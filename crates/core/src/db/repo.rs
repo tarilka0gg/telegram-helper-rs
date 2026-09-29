@@ -393,6 +393,12 @@ pub fn event_since(c: &Connection, kind: &str, since: &str, detail: Option<&str>
     Ok(n > 0)
 }
 
+/// SQL predicate on a `contacts` alias `k`: true when the chat is archived and the owner ignores archives.
+const HIDDEN_ARCHIVED: &str = "(k.is_archived = 1 AND COALESCE((SELECT ignore_archived FROM user_settings u WHERE u.user_id = k.user_id), 1) = 1)";
+
+/// Categories whose chats are NOT mirrored by default (set when the classifier files a chat there).
+pub const DEFAULT_OFF_CATEGORIES: &[&str] = &["entertainment"];
+
 // ---- chats page, categories, news dedupe -----------------------------------
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -410,11 +416,11 @@ pub struct ContactFull {
 }
 
 pub fn list_contacts_full(c: &Connection, user_id: i64) -> Result<Vec<ContactFull>> {
-    let mut st = c.prepare(
+    let mut st = c.prepare(&format!(
         "SELECT k.peer_id, k.display_name, k.username, k.peer_kind, k.category, k.is_news_source, k.mirror, k.is_archived, k.is_bot,
                 (SELECT count(*) FROM messages m WHERE m.user_id = k.user_id AND m.peer_id = k.peer_id)
-         FROM contacts k WHERE k.user_id = ? ORDER BY k.is_news_source DESC, k.display_name COLLATE NOCASE",
-    )?;
+         FROM contacts k WHERE k.user_id = ?1 AND NOT {HIDDEN_ARCHIVED} ORDER BY k.is_news_source DESC, k.display_name COLLATE NOCASE",
+    ))?;
     let rows = st.query_map([user_id], |r| {
         Ok(ContactFull { peer_id: r.get(0)?, name: r.get(1)?, username: r.get(2)?, kind: r.get(3)?, category: r.get(4)?, is_news_source: r.get(5)?, mirror: r.get(6)?, is_archived: r.get(7)?, is_bot: r.get(8)?, messages: r.get(9)? })
     })?;
@@ -431,20 +437,23 @@ pub fn update_contact_flags(c: &Connection, user_id: i64, peer_id: i64, news_sou
     Ok(n > 0)
 }
 
-/// Unknown chats are mirrored (the default), so a new conversation is never silently dropped.
+/// Should messages of this chat be stored? Off when switched off in the UI, or when the chat is archived
+/// and `ignore_archived` is on. Unknown chats are mirrored so a new conversation is never silently dropped.
 pub fn mirror_enabled(c: &Connection, user_id: i64, peer_id: i64) -> Result<bool> {
-    Ok(c.query_row("SELECT mirror FROM contacts WHERE user_id = ? AND peer_id = ?", params![user_id, peer_id], |r| r.get(0)).optional()?.unwrap_or(true))
+    let sql = format!("SELECT k.mirror = 1 AND NOT {HIDDEN_ARCHIVED} FROM contacts k WHERE k.user_id = ?1 AND k.peer_id = ?2");
+    Ok(c.query_row(&sql, params![user_id, peer_id], |r| r.get(0)).optional()?.unwrap_or(true))
 }
 
 /// News sources: (peer_id, kind, name).
 pub fn news_sources(c: &Connection, user_id: i64) -> Result<Vec<(i64, String, String)>> {
-    let mut st = c.prepare("SELECT peer_id, peer_kind, display_name FROM contacts WHERE user_id = ? AND is_news_source = 1 AND mirror = 1 ORDER BY display_name")?;
+    let mut st = c.prepare(&format!("SELECT k.peer_id, k.peer_kind, k.display_name FROM contacts k WHERE k.user_id = ? AND k.is_news_source = 1 AND k.mirror = 1 AND NOT {HIDDEN_ARCHIVED} ORDER BY k.display_name"))?;
     let rows = st.query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     rows.collect()
 }
 
 const NEWS_FROM: &str = "FROM messages m
     JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id AND k.is_news_source = 1 AND k.mirror = 1
+      AND NOT (k.is_archived = 1 AND COALESCE((SELECT ignore_archived FROM user_settings u WHERE u.user_id = k.user_id), 1) = 1)
     WHERE m.user_id = ?1 AND m.text IS NOT NULL AND trim(m.text) <> ''
       AND (?3 IS NULL OR lower(m.text) LIKE '%' || lower(?3) || '%')
       AND NOT EXISTS (SELECT 1 FROM news_sent s WHERE s.user_id = m.user_id AND s.peer_id = m.peer_id AND s.message_id = m.message_id)";
@@ -484,7 +493,7 @@ pub fn mark_news_sent(c: &Connection, user_id: i64, posts: &[(i64, i64)]) -> Res
 
 /// Rows for the LLM classifier: (peer_id, name, username, kind, up to 3 recent text snippets).
 pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> Result<Vec<(i64, String, Option<String>, String, Vec<String>)>> {
-    let mut st = c.prepare("SELECT peer_id, display_name, username, peer_kind FROM contacts WHERE user_id = ? AND is_bot = 0 AND category IS NULL ORDER BY display_name LIMIT ?")?;
+    let mut st = c.prepare(&format!("SELECT k.peer_id, k.display_name, k.username, k.peer_kind FROM contacts k WHERE k.user_id = ?1 AND k.is_bot = 0 AND k.category IS NULL AND NOT {HIDDEN_ARCHIVED} ORDER BY k.display_name LIMIT ?2"))?;
     let base = st.query_map(params![user_id, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))?.collect::<Result<Vec<_>>>()?;
     let mut snip = c.prepare("SELECT substr(text, 1, 120) FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND text IS NOT NULL AND trim(text) <> '' ORDER BY date DESC LIMIT 3")?;
     let mut out = Vec::with_capacity(base.len());
@@ -501,9 +510,10 @@ pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String,
     let mut n = 0;
     for (peer_id, category, news) in items {
         n += c.execute(
-            "UPDATE contacts SET category = ?1, is_news_source = CASE WHEN ?2 AND peer_kind = 'channel' THEN 1 ELSE is_news_source END
+            "UPDATE contacts SET category = ?1, is_news_source = CASE WHEN ?2 AND peer_kind = 'channel' THEN 1 ELSE is_news_source END,
+                    mirror = CASE WHEN ?5 THEN 0 ELSE mirror END
              WHERE user_id = ?3 AND peer_id = ?4 AND category IS NULL",
-            params![category, news, user_id, peer_id],
+            params![category, news, user_id, peer_id, DEFAULT_OFF_CATEGORIES.contains(&category.as_str())],
         )?;
     }
     Ok(n)
@@ -648,6 +658,22 @@ mod tests {
         assert_eq!(next[0].message_id, 1);
         mark_news_sent(&c, u, &[(10, 1)]).unwrap();
         assert!(news_latest_unsent(&c, u, None, 3).unwrap().is_empty());
+
+        // archived chats are invisible and never mirrored while ignore_archived is on (the default)
+        upsert_contact(&c, u, &ContactRow { peer_id: 55, peer_kind: "channel".into(), is_bot: false, is_archived: true, display_name: "Old".into(), username: None }).unwrap();
+        assert!(!mirror_enabled(&c, u, 55).unwrap());
+        assert!(list_contacts_full(&c, u).unwrap().iter().all(|k| k.peer_id != 55));
+        assert!(contacts_for_classification(&c, u, 50).unwrap().iter().all(|r| r.0 != 55));
+        set_setting(&c, u, "ignore_archived", 0.into()).unwrap();
+        assert!(mirror_enabled(&c, u, 55).unwrap());
+        assert!(list_contacts_full(&c, u).unwrap().iter().any(|k| k.peer_id == 55));
+        set_setting(&c, u, "ignore_archived", 1.into()).unwrap();
+
+        // entertainment is filed as not-mirrored by default; other categories stay mirrored
+        upsert_contact(&c, u, &ContactRow { peer_id: 60, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Memes".into(), username: None }).unwrap();
+        upsert_contact(&c, u, &ContactRow { peer_id: 61, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Jobs".into(), username: None }).unwrap();
+        apply_classification(&c, u, &[(60, "entertainment".into(), false), (61, "work".into(), false)]).unwrap();
+        assert!(!mirror_enabled(&c, u, 60).unwrap() && mirror_enabled(&c, u, 61).unwrap());
 
         // web toggles
         assert!(update_contact_flags(&c, u, 10, Some(false), Some(false), None).unwrap());
