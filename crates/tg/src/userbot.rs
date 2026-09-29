@@ -179,15 +179,50 @@ const AUTO_REPLY_SYSTEM: &str = "Ты отвечаешь от моего име�
 Никогда не выдавай, что ты ИИ. Не упоминай ассистента.\n\
 Не пиши длиннее 1–3 коротких предложений.";
 
+/// Why an incoming private message is *not* answered automatically (or `None` = go ahead).
+/// Pure so every rule can be tested without Telegram.
+#[derive(Debug, PartialEq)]
+pub enum Skip {
+    EmptyText,
+    Disabled,
+    ArchivedChat,
+    Cooldown,
+    OwnerOnline,
+}
+
+pub fn auto_reply_skip(
+    incoming: &str,
+    s: &repo::Settings,
+    archived: bool,
+    last_reply: Option<&str>,
+    now: chrono::NaiveDateTime,
+    owner_online: bool,
+) -> Option<Skip> {
+    if incoming.trim().is_empty() {
+        return Some(Skip::EmptyText); // media without text: never auto-answer
+    }
+    if !s.auto_reply_enabled {
+        return Some(Skip::Disabled);
+    }
+    if s.ignore_archived && archived {
+        return Some(Skip::ArchivedChat);
+    }
+    if let Some(last) = last_reply {
+        // An unparseable timestamp counts as "just replied": better to stay silent than to answer twice.
+        let since = repo::parse_ts(last).map(|t| now - t);
+        if since.is_none_or(|d| d < Duration::minutes(s.auto_reply_cooldown_min)) {
+            return Some(Skip::Cooldown);
+        }
+    }
+    if owner_online {
+        return Some(Skip::OwnerOnline);
+    }
+    None
+}
+
 async fn maybe_auto_reply(ctx: &Arc<Ctx>, client: &Client, m: &Message, peer: &Peer, peer_id: i64) -> Result<()> {
     let incoming = m.text().trim().to_string();
-    if incoming.is_empty() {
-        return Ok(()); // media without text: never auto-answer
-    }
     let s = ctx.settings().await?;
-    if !s.auto_reply_enabled {
-        return Ok(());
-    }
     let uid = ctx.user_id;
     let (archived, last): (bool, Option<String>) = ctx
         .db
@@ -196,19 +231,15 @@ async fn maybe_auto_reply(ctx: &Arc<Ctx>, client: &Client, m: &Message, peer: &P
             Ok((a, repo::last_auto_reply_at(c, uid, peer_id)?))
         })
         .await?;
-    if s.ignore_archived && archived {
+    // Cheap checks first; the `get_me` round trip is only made when everything else says "reply".
+    let now = Utc::now().naive_utc();
+    if let Some(why) = auto_reply_skip(&incoming, &s, archived, last.as_deref(), now, false) {
+        tracing::debug!("auto-reply skipped: {why:?}");
         return Ok(());
-    }
-    if let Some(last) = last {
-        let since = repo::parse_ts(&last).map(|t| Utc::now().naive_utc() - t);
-        // Unparseable timestamp: better to skip this reply than to risk answering the same person twice.
-        if since.is_none_or(|d| d < Duration::minutes(s.auto_reply_cooldown_min)) {
-            return Ok(());
-        }
     }
     // Only answer when the owner is really offline.
     let me = client.get_me().await?;
-    if matches!(me.status(), tl::enums::UserStatus::Online(_)) {
+    if auto_reply_skip(&incoming, &s, archived, last.as_deref(), now, matches!(me.status(), tl::enums::UserStatus::Online(_))).is_some() {
         return Ok(());
     }
 
@@ -366,4 +397,56 @@ pub fn spawn_avatar_download(ctx: Arc<Ctx>, client: Client, peers: Vec<Peer>) {
         }
         tracing::info!("avatars: downloaded {got} new");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings() -> repo::Settings {
+        let c = rusqlite::Connection::open_in_memory().unwrap();
+        tgh_core::db::schema::migrate(&c).unwrap();
+        let u = repo::ensure_user(&c, 1).unwrap();
+        repo::set_setting(&c, u, "auto_reply_enabled", 1.into()).unwrap();
+        repo::set_setting(&c, u, "auto_reply_cooldown_min", 30.into()).unwrap();
+        repo::settings(&c, u).unwrap()
+    }
+
+    fn now() -> chrono::NaiveDateTime {
+        repo::parse_ts("2026-06-01 12:00:00").unwrap()
+    }
+
+    #[test]
+    fn auto_reply_rules() {
+        let s = settings();
+        assert_eq!(auto_reply_skip("hi", &s, false, None, now(), false), None);
+        assert_eq!(auto_reply_skip("   ", &s, false, None, now(), false), Some(Skip::EmptyText));
+        assert_eq!(auto_reply_skip("", &s, false, None, now(), false), Some(Skip::EmptyText));
+        assert_eq!(auto_reply_skip("hi", &s, false, None, now(), true), Some(Skip::OwnerOnline));
+
+        let mut off = s.clone();
+        off.auto_reply_enabled = false;
+        assert_eq!(auto_reply_skip("hi", &off, false, None, now(), false), Some(Skip::Disabled));
+
+        // archived chats: ignored only while ignore_archived is on
+        assert_eq!(auto_reply_skip("hi", &s, true, None, now(), false), Some(Skip::ArchivedChat));
+        let mut keep = s.clone();
+        keep.ignore_archived = false;
+        assert_eq!(auto_reply_skip("hi", &keep, true, None, now(), false), None);
+    }
+
+    #[test]
+    fn cooldown_boundaries_and_python_timestamps() {
+        let s = settings();
+        // 29 min ago: still cooling down; exactly 30 or 31 min: allowed again
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("2026-06-01 11:31:00"), now(), false), Some(Skip::Cooldown));
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("2026-06-01 11:30:00"), now(), false), None);
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("2026-06-01 11:29:00"), now(), false), None);
+        // microseconds written by the Python original must be honoured, not ignored
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("2026-06-01 11:45:00.123456"), now(), false), Some(Skip::Cooldown));
+        // garbage timestamp -> stay silent (never double-reply)
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("yesterday"), now(), false), Some(Skip::Cooldown));
+        // a reply "from the future" (clock change) still counts as cooling down
+        assert_eq!(auto_reply_skip("hi", &s, false, Some("2026-06-01 13:00:00"), now(), false), Some(Skip::Cooldown));
+    }
 }

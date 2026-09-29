@@ -17,3 +17,6 @@ rusqlite.workspace = true
 tgh-native = { path = "../native" }
 base64 = "0.22"
 serde.workspace = true
+
+[dev-dependencies]
+axum.workspace = true

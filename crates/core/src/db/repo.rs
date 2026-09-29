@@ -522,17 +522,26 @@ pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> 
 
 /// Stores categories from the classifier; channels judged "news" become news sources.
 /// Existing manual choices are never overridden: only rows without a category are touched.
-pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String, bool)]) -> Result<usize> {
-    let mut n = 0;
+/// Returns `(rows classified, rows newly marked as news sources)` — the second counts real changes,
+/// not the model's claims (a group called "news" is only categorized, never made a source).
+pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String, bool)]) -> Result<(usize, usize)> {
+    let (mut done, mut sources) = (0, 0);
     for (peer_id, category, news) in items {
-        n += c.execute(
+        let kind: Option<String> = c
+            .query_row("SELECT peer_kind FROM contacts WHERE user_id = ?1 AND peer_id = ?2 AND category IS NULL", params![user_id, peer_id], |r| r.get(0))
+            .optional()?;
+        let n = c.execute(
             "UPDATE contacts SET category = ?1, is_news_source = CASE WHEN ?2 AND peer_kind = 'channel' THEN 1 ELSE is_news_source END,
                     mirror = CASE WHEN ?5 THEN 0 ELSE mirror END
              WHERE user_id = ?3 AND peer_id = ?4 AND category IS NULL",
             params![category, news, user_id, peer_id, DEFAULT_OFF_CATEGORIES.contains(&category.as_str())],
         )?;
+        done += n;
+        if n > 0 && *news && kind.as_deref() == Some("channel") {
+            sources += 1;
+        }
     }
-    Ok(n)
+    Ok((done, sources))
 }
 
 // ---- auto-reply ------------------------------------------------------------
@@ -680,8 +689,9 @@ mod tests {
         // classifier: channel -> news source, group -> only a category; manual choices survive
         let rows = contacts_for_classification(&c, u, 50).unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(apply_classification(&c, u, &[(10, "news".into(), true), (11, "family".into(), true)]).unwrap(), 2);
-        assert_eq!(apply_classification(&c, u, &[(10, "other".into(), false)]).unwrap(), 0); // already classified
+        // the group (11) is categorized but is never counted as a news source
+        assert_eq!(apply_classification(&c, u, &[(10, "news".into(), true), (11, "family".into(), true)]).unwrap(), (2, 1));
+        assert_eq!(apply_classification(&c, u, &[(10, "other".into(), false)]).unwrap(), (0, 0)); // already classified
         assert_eq!(news_sources(&c, u).unwrap().len(), 1); // the group was not turned into a source
 
         // nothing in the last day -> fallback returns the single latest post per source

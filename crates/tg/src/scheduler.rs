@@ -102,6 +102,15 @@ async fn news_loop(bot: Arc<Bot>) {
     }
 }
 
+/// What to tell the owner about a deadline `left` from now: `(label, new status)`, or nothing yet.
+/// `open` -> "soon" once inside the lead window; past the deadline -> "overdue" once (status then leaves the reminder set).
+fn reminder_due(left: chrono::Duration, status: &str, lead_hours: i64, overdue_enabled: bool) -> Option<(&'static str, &'static str)> {
+    if left < chrono::Duration::zero() {
+        return overdue_enabled.then_some(("⚠ Прострочено", "overdue"));
+    }
+    (status == "open" && left <= chrono::Duration::hours(lead_hours)).then_some(("⏰ Скоро", "reminded"))
+}
+
 async fn reminders_loop(bot: Arc<Bot>) {
     loop {
         tokio::time::sleep(TICK).await;
@@ -115,15 +124,7 @@ async fn reminders_loop(bot: Arc<Bot>) {
         let now = Utc::now().naive_utc();
         for (id, who, text, deadline, status) in items {
             let Some(dl) = repo::parse_ts(&deadline) else { continue };
-            let left = dl - now;
-            let (label, new_status) = if left < chrono::Duration::zero() {
-                if !s.reminder_overdue_enabled { continue }
-                ("⚠ Прострочено", "overdue")
-            } else if status == "open" && left <= chrono::Duration::hours(s.reminder_lead_hours) {
-                ("⏰ Скоро", "reminded")
-            } else {
-                continue;
-            };
+            let Some((label, new_status)) = reminder_due(dl - now, &status, s.reminder_lead_hours, s.reminder_overdue_enabled) else { continue };
             let who = if who.is_empty() { String::new() } else { format!(" ({})", esc(&who)) };
             let sent = bot.say(peer, &format!("{label}: {}{who}\nдо {deadline} UTC", esc(&text))).await;
             if sent.is_ok() {
@@ -195,6 +196,22 @@ mod tests {
         assert!(!due("08:59", "09:00")); // not yet
         assert!(!due("23:59", "00:05"));
         assert!(!due("09:00", "garbage") && !due("nope", "09:00"));
+    }
+
+    #[test]
+    fn reminder_rules() {
+        use chrono::Duration as D;
+        // outside the lead window: nothing; inside: "soon" exactly once (status must be open)
+        assert_eq!(reminder_due(D::hours(5), "open", 2, true), None);
+        assert_eq!(reminder_due(D::hours(2), "open", 2, true), Some(("⏰ Скоро", "reminded")));
+        assert_eq!(reminder_due(D::minutes(1), "open", 2, true), Some(("⏰ Скоро", "reminded")));
+        assert_eq!(reminder_due(D::minutes(1), "reminded", 2, true), None); // already warned
+        // overdue fires regardless of the earlier "reminded", and only if enabled
+        assert_eq!(reminder_due(D::minutes(-1), "open", 2, true), Some(("⚠ Прострочено", "overdue")));
+        assert_eq!(reminder_due(D::days(-9), "reminded", 2, true), Some(("⚠ Прострочено", "overdue")));
+        assert_eq!(reminder_due(D::minutes(-1), "open", 2, false), None);
+        // exactly at the deadline counts as still upcoming (not yet overdue)
+        assert_eq!(reminder_due(D::zero(), "open", 2, true), Some(("⏰ Скоро", "reminded")));
     }
 
     #[test]

@@ -79,3 +79,53 @@ impl Ctx {
         }
     }
 }
+
+/// Test support: a `Ctx` over an in-memory DB and a throw-away key, plus a fake OpenAI-compatible server.
+#[cfg(test)]
+pub(crate) mod testkit {
+    use super::*;
+    use axum::{routing::post, Json, Router};
+    use base64::Engine;
+    use serde_json::{json, Value};
+
+    pub async fn ctx() -> Arc<Ctx> {
+        let cfg = Config {
+            bot_token: "t".into(),
+            owner_telegram_id: 1,
+            encryption_key: base64::engine::general_purpose::URL_SAFE.encode([7u8; 32]),
+            api_id: 1,
+            api_hash: "h".into(),
+            data_dir: std::env::temp_dir().join("tgh-testkit"),
+            web_addr: "127.0.0.1:0".into(),
+        };
+        Ctx::new(cfg, Db::open_in_memory().unwrap(), Arc::new(Status::default())).await.unwrap()
+    }
+
+    /// `handler(request_json) -> (status, body_json)`; returns the base URL.
+    pub async fn fake_llm(handler: impl Fn(Value) -> (u16, Value) + Send + Sync + 'static) -> String {
+        let h = Arc::new(handler);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(req): Json<Value>| {
+                let h = h.clone();
+                async move {
+                    let (code, body) = h(req);
+                    (axum::http::StatusCode::from_u16(code).unwrap(), Json(body))
+                }
+            }),
+        );
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        base
+    }
+
+    /// The user-role message of an OpenAI-style request.
+    pub fn user_text(req: &Value) -> String {
+        req["messages"].as_array().and_then(|m| m.iter().rev().find(|x| x["role"] == "user")).and_then(|m| m["content"].as_str()).unwrap_or("").to_string()
+    }
+
+    pub fn reply(text: &str) -> (u16, Value) {
+        (200, json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}))
+    }
+}

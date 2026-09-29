@@ -160,6 +160,10 @@ pub async fn build_digest(ctx: &Ctx) -> Result<String> {
     let Some(llm) = ctx.llm().await? else {
         return Ok("Не задан LLM-ключ — не могу собрать дайджест. Открой /settings.".into());
     };
+    build_digest_with(ctx, &llm).await
+}
+
+pub async fn build_digest_with(ctx: &Ctx, llm: &LlmClient) -> Result<String> {
     let s = ctx.settings().await?;
     let uid = ctx.user_id;
     let since = repo::fmt_ts(Utc::now() - Duration::hours(14));
@@ -205,7 +209,7 @@ pub async fn build_digest(ctx: &Ctx) -> Result<String> {
     if parts.is_empty() {
         return Ok("☀ Доброе утро! За ночь — тишина.".into());
     }
-    ask(&llm, "digest", DIGEST_SYSTEM, parts.join("\n\n"), s.use_heavy_model).await
+    ask(llm, "digest", DIGEST_SYSTEM, parts.join("\n\n"), s.use_heavy_model).await
 }
 
 #[cfg(test)]
@@ -285,5 +289,45 @@ mod tests {
         assert_eq!(message_to_text(&m), "[2026] Я: [photo]"); // short date must not panic on slicing
         m.date = "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂".into();
         let _ = message_to_text(&m); // 16-byte cut inside an emoji must not panic
+    }
+
+    #[tokio::test]
+    async fn digest_prompt_contains_waiting_promises_and_autoreplies() {
+        use crate::ctx::testkit::{ctx, fake_llm, reply, user_text};
+        let ctx = ctx().await;
+        let uid = ctx.user_id;
+        let now = chrono::Utc::now();
+        let recent = repo::fmt_ts(now - Duration::hours(1));
+        ctx.db.call(move |c| {
+            repo::upsert_contact(c, uid, &ContactRow { peer_id: 10, peer_kind: "user".into(), is_bot: false, is_archived: false, display_name: "Оля".into(), username: None })?;
+            repo::upsert_contact(c, uid, &ContactRow { peer_id: 20, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Канал".into(), username: None })?;
+            let m = |peer: i64, id: i64, out: bool, text: &str| MessageRow { peer_id: peer, message_id: id, sender_id: None, sender_name: Some("Оля".into()), is_outgoing: out, date: recent.clone(), kind: "text".into(), text: Some(text.into()) };
+            repo::save_message(c, uid, &m(10, 1, false, "ти завтра будеш?"))?;
+            repo::save_message(c, uid, &m(20, 1, false, "новий пост каналу"))?; // must NOT appear as "waiting"
+            repo::add_commitment(c, uid, 10, "Оля", "mine", "надіслати договір", Some("2000-01-01 00:00:00"))?; // overdue
+            repo::add_commitment(c, uid, 10, "Оля", "mine", "далека справа", Some("2999-01-01 00:00:00"))?; // not hot
+            repo::log_auto_reply(c, uid, 10, "Оля", "hi", "busy")?;
+            Ok(())
+        }).await.unwrap();
+        // the fake model echoes what it was asked, so the test can inspect the prompt it received
+        let base = fake_llm(|req| reply(&user_text(&req))).await;
+        let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
+        let out = build_digest_with(&ctx, &llm).await.unwrap();
+        assert!(out.contains("Ждут ответа") && out.contains("ти завтра будеш?"), "{out}");
+        assert!(!out.contains("новий пост каналу"), "channel post leaked into 'waiting': {out}");
+        assert!(out.contains("надіслати договір") && !out.contains("далека справа"), "{out}");
+        assert!(out.contains("Авто-ответов: 1"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn quiet_night_needs_no_llm_call() {
+        use crate::ctx::testkit::{ctx, fake_llm};
+        let ctx = ctx().await;
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let base = fake_llm(move |_| { c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); (500, serde_json::json!({})) }).await;
+        let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
+        assert!(build_digest_with(&ctx, &llm).await.unwrap().contains("тишина"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
