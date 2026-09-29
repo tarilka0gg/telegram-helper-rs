@@ -147,9 +147,9 @@ impl Bot {
             return self.say_with(peer, &format!("Чат: <b>{}</b>", esc(name)), Some(rows)).await;
         }
         let Some(llm) = self.ctx.llm().await? else { return self.say(peer, "Спершу додай LLM-ключ: <code>/key openai sk-…</code>").await };
-        let msgs = features::history(&self.ctx, peer_id, 60).await?;
+        let msgs = self.recent_messages(peer_id, name).await?;
         if msgs.is_empty() {
-            return self.say(peer, "У базі ще немає повідомлень цього чату (зеркало наповнюється в реальному часі).").await;
+            return self.say(peer, "У цьому чаті немає повідомлень (або Telegram їх не віддав).").await;
         }
         let heavy = self.ctx.settings().await?.use_heavy_model;
         let out = match action {
@@ -165,6 +165,34 @@ impl Bot {
             _ => return Ok(()),
         };
         self.say(peer, &out).await
+    }
+
+    /// Messages for an explicit request about one chat. The DB copy is refreshed from Telegram first,
+    /// so it works for chats that were never mirrored. If the chat is switched off (mirror off, or
+    /// archived), the messages are fetched for this answer only and never stored.
+    async fn recent_messages(&self, peer_id: i64, name: &str) -> Result<Vec<tgh_core::db::repo::MessageRow>> {
+        let uid = self.ctx.user_id;
+        let (kind, mirror) = self
+            .ctx
+            .db
+            .call(move |c| {
+                let kind = repo::list_contacts(c, uid)?.into_iter().find(|k| k.peer_id == peer_id).map(|k| k.peer_kind);
+                Ok((kind, repo::mirror_enabled(c, uid, peer_id)?))
+            })
+            .await?;
+        if let (Some(kind), Some(client)) = (kind, self.mgr.client().await) {
+            let live = if mirror {
+                crate::userbot::backfill_peer(&self.ctx, &client, peer_id, &kind, 60).await.map(|_| None)
+            } else {
+                crate::userbot::fetch_recent(&client, peer_id, &kind, 60).await.map(Some)
+            };
+            match live {
+                Ok(Some(rows)) => return Ok(rows),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("live fetch for '{name}' failed, using stored messages: {e:#}"),
+            }
+        }
+        features::history(&self.ctx, peer_id, 60).await
     }
 
     async fn find_in_chats(&self, query: &str, action: &str, peer: PeerRef) -> Result<()> {

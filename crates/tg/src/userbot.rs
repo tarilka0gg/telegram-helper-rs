@@ -278,6 +278,18 @@ pub async fn peer_ref(peer: &Peer) -> Result<grammers_client::session::types::Pe
     peer.to_ref().await.map_err(|e| anyhow::anyhow!("peer ref: {e}"))?.context("peer not in session cache")
 }
 
+/// Latest messages of a chat straight from Telegram, oldest first. Nothing is written to the DB.
+pub async fn fetch_recent(client: &Client, peer_id: i64, kind: &str, limit: usize) -> Result<Vec<MessageRow>> {
+    let pref = crate::agent::peer_ref_of(kind, peer_id).context("bad peer")?;
+    let mut iter = client.iter_messages(pref).limit(limit);
+    let mut rows = Vec::new();
+    while let Some(m) = iter.next().await.map_err(|e| anyhow::anyhow!("iter_messages: {e}"))? {
+        rows.push(message_row(&m, peer_id));
+    }
+    rows.reverse();
+    Ok(rows)
+}
+
 /// Pulls the latest posts of one chat/channel into the DB (deduplicated by message id).
 pub async fn backfill_peer(ctx: &Arc<Ctx>, client: &Client, peer_id: i64, kind: &str, limit: usize) -> Result<usize> {
     let pref = crate::agent::peer_ref_of(kind, peer_id).context("bad peer")?;
