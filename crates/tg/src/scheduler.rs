@@ -7,7 +7,10 @@ use chrono::{Timelike, Utc};
 use grammers_client::session::types::PeerId;
 use tgh_core::db::repo;
 
-use crate::{bot::{esc, Bot}, features, userbot};
+use crate::{
+    bot::{esc, Bot},
+    features, userbot,
+};
 
 const TICK: Duration = Duration::from_secs(60);
 
@@ -49,7 +52,12 @@ fn due(now_hhmm: &str, at_hhmm: &str) -> bool {
 fn local_clock(tz: &str) -> (String, String) {
     let tz: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
     let now = Utc::now().with_timezone(&tz);
-    let midnight = now.date_naive().and_hms_opt(0, 0, 0).and_then(|m| m.and_local_timezone(tz).earliest()).map(|d| d.with_timezone(&Utc)).unwrap_or_else(Utc::now);
+    let midnight = now
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .and_then(|m| m.and_local_timezone(tz).earliest())
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now);
     (format!("{:02}:{:02}", now.hour(), now.minute()), repo::fmt_ts(midnight))
 }
 
@@ -125,7 +133,9 @@ async fn reminders_loop(bot: Arc<Bot>) {
         let now = Utc::now().naive_utc();
         for (id, who, text, deadline, status) in items {
             let Some(dl) = repo::parse_ts(&deadline) else { continue };
-            let Some((label, new_status)) = reminder_due(dl - now, &status, s.reminder_lead_hours, s.reminder_overdue_enabled) else { continue };
+            let Some((label, new_status)) = reminder_due(dl - now, &status, s.reminder_lead_hours, s.reminder_overdue_enabled) else {
+                continue;
+            };
             let who = if who.is_empty() { String::new() } else { format!(" ({})", esc(&who)) };
             let sent = bot.say(peer, &format!("{label}: {}{who}\nдо {deadline} UTC", esc(&text))).await;
             if sent.is_ok() {
@@ -219,7 +229,7 @@ mod tests {
         assert_eq!(reminder_due(D::hours(2), "open", 2, true), Some(("⏰ Скоро", "reminded")));
         assert_eq!(reminder_due(D::minutes(1), "open", 2, true), Some(("⏰ Скоро", "reminded")));
         assert_eq!(reminder_due(D::minutes(1), "reminded", 2, true), None); // already warned
-        // overdue fires regardless of the earlier "reminded", and only if enabled
+                                                                            // overdue fires regardless of the earlier "reminded", and only if enabled
         assert_eq!(reminder_due(D::minutes(-1), "open", 2, true), Some(("⚠ Прострочено", "overdue")));
         assert_eq!(reminder_due(D::days(-9), "reminded", 2, true), Some(("⚠ Прострочено", "overdue")));
         assert_eq!(reminder_due(D::minutes(-1), "open", 2, false), None);

@@ -70,7 +70,14 @@ async fn ask(llm: &LlmClient, purpose: &str, system: &str, user: String, heavy: 
 }
 
 pub async fn summarize(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow]) -> Result<String> {
-    ask(llm, "summary", &format!("{SUMMARY_SYSTEM}{UK}"), format!("Собеседник: {name}\n\nПереписка (последние {} сообщений):\n{}", msgs.len(), transcript(msgs)), heavy).await
+    ask(
+        llm,
+        "summary",
+        &format!("{SUMMARY_SYSTEM}{UK}"),
+        format!("Собеседник: {name}\n\nПереписка (последние {} сообщений):\n{}", msgs.len(), transcript(msgs)),
+        heavy,
+    )
+    .await
 }
 
 pub async fn draft_reply(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow], instruction: Option<&str>) -> Result<String> {
@@ -79,7 +86,14 @@ pub async fn draft_reply(llm: &LlmClient, heavy: bool, name: &str, msgs: &[Messa
 }
 
 pub async fn catchup(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow]) -> Result<String> {
-    ask(llm, "catchup", &format!("{CATCHUP_SYSTEM}{UK}"), format!("Собеседник: {name}\n\nПоследние сообщения:\n{}", transcript(msgs)), heavy).await
+    ask(
+        llm,
+        "catchup",
+        &format!("{CATCHUP_SYSTEM}{UK}"),
+        format!("Собеседник: {name}\n\nПоследние сообщения:\n{}", transcript(msgs)),
+        heavy,
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,12 +131,19 @@ pub fn parse_deadline(s: &str) -> Option<String> {
 }
 
 /// Extracts commitments from a chat and stores them. Returns what was saved.
-pub async fn extract_commitments(ctx: &Arc<Ctx>, llm: &LlmClient, peer_id: i64, name: &str, msgs: &[MessageRow]) -> Result<Vec<(String, String, Option<String>)>> {
+pub async fn extract_commitments(
+    ctx: &Arc<Ctx>,
+    llm: &LlmClient,
+    peer_id: i64,
+    name: &str,
+    msgs: &[MessageRow],
+) -> Result<Vec<(String, String, Option<String>)>> {
     if msgs.is_empty() {
         return Ok(vec![]);
     }
     let prompt = format!("Собеседник: {name}.\nПереписка:\n\n{}\n\nВыдели обязательства.", transcript(msgs));
-    let raw = llm.chat("commitments", &[ChatMessage::system(format!("{COMMITMENTS_SYSTEM}{UK}")), ChatMessage::user(prompt)], false).await?;
+    let raw =
+        llm.chat("commitments", &[ChatMessage::system(format!("{COMMITMENTS_SYSTEM}{UK}")), ChatMessage::user(prompt)], false).await?;
     let items = parse_commitments(&raw);
     let (uid, name, saved) = (ctx.user_id, name.to_string(), items.clone());
     ctx.db
@@ -227,7 +248,14 @@ mod tests {
     use super::*;
 
     fn contact(id: i64, name: &str, user: Option<&str>) -> ContactRow {
-        ContactRow { peer_id: id, peer_kind: "user".into(), is_bot: false, is_archived: false, display_name: name.into(), username: user.map(Into::into) }
+        ContactRow {
+            peer_id: id,
+            peer_kind: "user".into(),
+            is_bot: false,
+            is_archived: false,
+            display_name: name.into(),
+            username: user.map(Into::into),
+        }
     }
 
     #[test]
@@ -244,7 +272,8 @@ mod tests {
 
     #[test]
     fn contact_ranking_uses_fuzzy_and_username() {
-        let cs = vec![contact(1, "Олександр Петренко", Some("oleks")), contact(2, "Оля Іванова", None), contact(3, "Максим", Some("max_t"))];
+        let cs =
+            vec![contact(1, "Олександр Петренко", Some("oleks")), contact(2, "Оля Іванова", None), contact(3, "Максим", Some("max_t"))];
         assert_eq!(rank_contacts(&cs, "Оля")[0].0.peer_id, 2);
         assert_eq!(rank_contacts(&cs, "@oleks")[0].0.peer_id, 1);
         assert!(rank_contacts(&cs, "Зіновій").is_empty());
@@ -252,8 +281,20 @@ mod tests {
 
     #[test]
     fn topic_that_names_a_channel_is_recognised_even_with_typos() {
-        let mk = |id: i64, name: &str, kind: &str| ContactRow { peer_id: id, peer_kind: kind.into(), is_bot: false, is_archived: false, display_name: name.into(), username: None };
-        let cs = vec![mk(1, "Starfield | Школярі", "supergroup"), mk(2, "Бізнес-інкубатор Starfield", "channel"), mk(3, "Оля Іванова", "user"), mk(4, "Світло Місто / Область", "channel")];
+        let mk = |id: i64, name: &str, kind: &str| ContactRow {
+            peer_id: id,
+            peer_kind: kind.into(),
+            is_bot: false,
+            is_archived: false,
+            display_name: name.into(),
+            username: None,
+        };
+        let cs = vec![
+            mk(1, "Starfield | Школярі", "supergroup"),
+            mk(2, "Бізнес-інкубатор Starfield", "channel"),
+            mk(3, "Оля Іванова", "user"),
+            mk(4, "Світло Місто / Область", "channel"),
+        ];
         for yes in ["starfeild", "Starfield", "starfield школярі", "свiтло місто", "Бізнес інкубатор"] {
             assert!(topic_names_a_chat(&cs, yes), "{yes}");
         }
@@ -264,7 +305,16 @@ mod tests {
 
     #[test]
     fn transcript_format() {
-        let m = MessageRow { peer_id: 1, message_id: 1, sender_id: None, sender_name: Some("Оля".into()), is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "photo".into(), text: None };
+        let m = MessageRow {
+            peer_id: 1,
+            message_id: 1,
+            sender_id: None,
+            sender_name: Some("Оля".into()),
+            is_outgoing: false,
+            date: "2026-01-01 10:00:00".into(),
+            kind: "photo".into(),
+            text: None,
+        };
         assert_eq!(message_to_text(&m), "[2026-01-01 10:00] Оля: [photo]");
     }
 
@@ -282,7 +332,19 @@ mod tests {
 
     #[test]
     fn commitments_parser_survives_garbage() {
-        for junk in ["", "[", "{}", "null", "[null]", "[1,2]", "[{}]", "[{\"direction\":1}]", "[{\"direction\":\"mine\",\"text\":null}]", "```json\n[\n```", &"[".repeat(10_000)] {
+        for junk in [
+            "",
+            "[",
+            "{}",
+            "null",
+            "[null]",
+            "[1,2]",
+            "[{}]",
+            "[{\"direction\":1}]",
+            "[{\"direction\":\"mine\",\"text\":null}]",
+            "```json\n[\n```",
+            &"[".repeat(10_000),
+        ] {
             let _ = parse_commitments(junk);
         }
         let v = parse_commitments("[{\"direction\":\"mine\",\"text\":\"  a\\tb  \",\"deadline\":null,\"message_id\":\"x\"}]");
@@ -292,7 +354,18 @@ mod tests {
     #[test]
     fn contact_ranking_is_total_and_stable_for_odd_names() {
         let names = ["", " ", "🙂", "Оля", "Оля", "Ольга Іванова", "ОЛЯ", "o", "A".repeat(500).leak() as &str, "\u{0}", "İİİ"];
-        let cs: Vec<ContactRow> = names.iter().enumerate().map(|(i, n)| ContactRow { peer_id: i as i64, peer_kind: "user".into(), is_bot: i == 9, is_archived: false, display_name: (*n).into(), username: if i % 2 == 0 { Some((*n).into()) } else { None } }).collect();
+        let cs: Vec<ContactRow> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| ContactRow {
+                peer_id: i as i64,
+                peer_kind: "user".into(),
+                is_bot: i == 9,
+                is_archived: false,
+                display_name: (*n).into(),
+                username: if i % 2 == 0 { Some((*n).into()) } else { None },
+            })
+            .collect();
         for q in ["", "оля", "@", "@оля", "🙂", "İ", &"я".repeat(1000), "\u{0}"] {
             let r = rank_contacts(&cs, q);
             assert!(r.len() <= 5);
@@ -307,7 +380,16 @@ mod tests {
 
     #[test]
     fn transcript_handles_multibyte_dates_and_missing_bodies() {
-        let mut m = MessageRow { peer_id: 1, message_id: 1, sender_id: None, sender_name: None, is_outgoing: true, date: "2026".into(), kind: "photo".into(), text: None };
+        let mut m = MessageRow {
+            peer_id: 1,
+            message_id: 1,
+            sender_id: None,
+            sender_name: None,
+            is_outgoing: true,
+            date: "2026".into(),
+            kind: "photo".into(),
+            text: None,
+        };
         assert_eq!(message_to_text(&m), "[2026] Я: [photo]"); // short date must not panic on slicing
         m.date = "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂".into();
         let _ = message_to_text(&m); // 16-byte cut inside an emoji must not panic
@@ -320,17 +402,51 @@ mod tests {
         let uid = ctx.user_id;
         let now = chrono::Utc::now();
         let recent = repo::fmt_ts(now - Duration::hours(1));
-        ctx.db.call(move |c| {
-            repo::upsert_contact(c, uid, &ContactRow { peer_id: 10, peer_kind: "user".into(), is_bot: false, is_archived: false, display_name: "Оля".into(), username: None })?;
-            repo::upsert_contact(c, uid, &ContactRow { peer_id: 20, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Канал".into(), username: None })?;
-            let m = |peer: i64, id: i64, out: bool, text: &str| MessageRow { peer_id: peer, message_id: id, sender_id: None, sender_name: Some("Оля".into()), is_outgoing: out, date: recent.clone(), kind: "text".into(), text: Some(text.into()) };
-            repo::save_message(c, uid, &m(10, 1, false, "ти завтра будеш?"))?;
-            repo::save_message(c, uid, &m(20, 1, false, "новий пост каналу"))?; // must NOT appear as "waiting"
-            repo::add_commitment(c, uid, 10, "Оля", "mine", "надіслати договір", Some("2000-01-01 00:00:00"))?; // overdue
-            repo::add_commitment(c, uid, 10, "Оля", "mine", "далека справа", Some("2999-01-01 00:00:00"))?; // not hot
-            repo::log_auto_reply(c, uid, 10, "Оля", "hi", "busy")?;
-            Ok(())
-        }).await.unwrap();
+        ctx.db
+            .call(move |c| {
+                repo::upsert_contact(
+                    c,
+                    uid,
+                    &ContactRow {
+                        peer_id: 10,
+                        peer_kind: "user".into(),
+                        is_bot: false,
+                        is_archived: false,
+                        display_name: "Оля".into(),
+                        username: None,
+                    },
+                )?;
+                repo::upsert_contact(
+                    c,
+                    uid,
+                    &ContactRow {
+                        peer_id: 20,
+                        peer_kind: "channel".into(),
+                        is_bot: false,
+                        is_archived: false,
+                        display_name: "Канал".into(),
+                        username: None,
+                    },
+                )?;
+                let m = |peer: i64, id: i64, out: bool, text: &str| MessageRow {
+                    peer_id: peer,
+                    message_id: id,
+                    sender_id: None,
+                    sender_name: Some("Оля".into()),
+                    is_outgoing: out,
+                    date: recent.clone(),
+                    kind: "text".into(),
+                    text: Some(text.into()),
+                };
+                repo::save_message(c, uid, &m(10, 1, false, "ти завтра будеш?"))?;
+                repo::save_message(c, uid, &m(20, 1, false, "новий пост каналу"))?; // must NOT appear as "waiting"
+                repo::add_commitment(c, uid, 10, "Оля", "mine", "надіслати договір", Some("2000-01-01 00:00:00"))?; // overdue
+                repo::add_commitment(c, uid, 10, "Оля", "mine", "далека справа", Some("2999-01-01 00:00:00"))?; // not hot
+                repo::log_auto_reply(c, uid, 10, "Оля", "hi", "busy")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         // the fake model echoes what it was asked, so the test can inspect the prompt it received
         let base = fake_llm(|req| reply(&user_text(&req))).await;
         let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
@@ -347,7 +463,11 @@ mod tests {
         let ctx = ctx().await;
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c2 = calls.clone();
-        let base = fake_llm(move |_| { c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); (500, serde_json::json!({})) }).await;
+        let base = fake_llm(move |_| {
+            c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (500, serde_json::json!({}))
+        })
+        .await;
         let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
         assert!(build_digest_with(&ctx, &llm).await.unwrap().contains("тиша"));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);

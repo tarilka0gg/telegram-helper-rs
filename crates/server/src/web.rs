@@ -84,51 +84,81 @@ pub fn router(state: AppState) -> Router {
         .route("/style.css", get(|| asset(include_str!("../web/style.css"), "text/css; charset=utf-8")))
         .route("/chats", get(|| asset(include_str!("../web/chats.html"), "text/html; charset=utf-8")))
         .route("/chats.js", get(|| asset(include_str!("../web/chats.js"), "text/javascript; charset=utf-8")))
-        .route("/api/contacts", get(|State(s): State<AppState>| async move {
-            let uid = s.user_id;
-            ok(s.db.call(move |c| Ok(serde_json::to_value(repo::list_contacts_full(c, uid)?).unwrap_or_default())).await)
-        }))
+        .route(
+            "/api/contacts",
+            get(|State(s): State<AppState>| async move {
+                let uid = s.user_id;
+                ok(s.db.call(move |c| Ok(serde_json::to_value(repo::list_contacts_full(c, uid)?).unwrap_or_default())).await)
+            }),
+        )
         .route("/api/contacts/{peer_id}", axum::routing::post(update_contact))
         .route("/avatars/{peer_id}", get(avatar))
         .route("/login", get(|| asset(include_str!("../web/login.html"), "text/html; charset=utf-8")))
         .route("/api/selftest", axum::routing::post(selftest))
         .route("/api/qr", get(|State(s): State<AppState>| async move { Json(qr_json(&s)) }))
-        .route("/api/overview", get(|State(s): State<AppState>| async move {
-            let up = s.status.userbot_connected.load(Ordering::Relaxed);
-            ok(s.db.call(move |c| a::overview(c, up)).await)
-        }))
-        .route("/api/messages/daily", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let d = q.days.unwrap_or(30);
-            ok(s.db.call(move |c| a::messages_daily(c, d)).await)
-        }))
-        .route("/api/messages/hourly", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let d = q.days.unwrap_or(30);
-            ok(s.db.call(move |c| a::messages_hourly(c, d)).await)
-        }))
-        .route("/api/messages/top_chats", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let (d, l) = (q.days.unwrap_or(30), q.limit.unwrap_or(10));
-            ok(s.db.call(move |c| a::top_chats(c, d, l)).await)
-        }))
-        .route("/api/llm/daily", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let d = q.days.unwrap_or(30);
-            ok(s.db.call(move |c| a::llm_daily(c, d)).await)
-        }))
-        .route("/api/llm/by_purpose", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let d = q.days.unwrap_or(30);
-            ok(s.db.call(move |c| a::llm_by_purpose(c, d)).await)
-        }))
-        .route("/api/autoreply/recent", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let l = q.limit.unwrap_or(50);
-            ok(s.db.call(move |c| a::autoreply_recent(c, l)).await)
-        }))
-        .route("/api/commitments", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let st = q.status.unwrap_or_else(|| "open".into());
-            ok(s.db.call(move |c| a::commitments(c, &st)).await)
-        }))
-        .route("/api/events", get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
-            let l = q.limit.unwrap_or(100);
-            ok(s.db.call(move |c| a::events(c, l)).await)
-        }))
+        .route(
+            "/api/overview",
+            get(|State(s): State<AppState>| async move {
+                let up = s.status.userbot_connected.load(Ordering::Relaxed);
+                ok(s.db.call(move |c| a::overview(c, up)).await)
+            }),
+        )
+        .route(
+            "/api/messages/daily",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let d = q.days.unwrap_or(30);
+                ok(s.db.call(move |c| a::messages_daily(c, d)).await)
+            }),
+        )
+        .route(
+            "/api/messages/hourly",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let d = q.days.unwrap_or(30);
+                ok(s.db.call(move |c| a::messages_hourly(c, d)).await)
+            }),
+        )
+        .route(
+            "/api/messages/top_chats",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let (d, l) = (q.days.unwrap_or(30), q.limit.unwrap_or(10));
+                ok(s.db.call(move |c| a::top_chats(c, d, l)).await)
+            }),
+        )
+        .route(
+            "/api/llm/daily",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let d = q.days.unwrap_or(30);
+                ok(s.db.call(move |c| a::llm_daily(c, d)).await)
+            }),
+        )
+        .route(
+            "/api/llm/by_purpose",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let d = q.days.unwrap_or(30);
+                ok(s.db.call(move |c| a::llm_by_purpose(c, d)).await)
+            }),
+        )
+        .route(
+            "/api/autoreply/recent",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let l = q.limit.unwrap_or(50);
+                ok(s.db.call(move |c| a::autoreply_recent(c, l)).await)
+            }),
+        )
+        .route(
+            "/api/commitments",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let st = q.status.unwrap_or_else(|| "open".into());
+                ok(s.db.call(move |c| a::commitments(c, &st)).await)
+            }),
+        )
+        .route(
+            "/api/events",
+            get(|State(s): State<AppState>, Query(q): Query<Q>| async move {
+                let l = q.limit.unwrap_or(100);
+                ok(s.db.call(move |c| a::events(c, l)).await)
+            }),
+        )
         .layer(middleware::from_fn(csrf_guard))
         .layer(middleware::from_fn(local_host_only))
         .with_state(state)
@@ -139,7 +169,8 @@ async fn selftest(State(s): State<AppState>) -> Response {
     let Some(mgr) = &s.mgr else { return (StatusCode::SERVICE_UNAVAILABLE, "no Telegram side in demo mode").into_response() };
     let checks = tgh_tg::selftest::run(mgr).await;
     let all_ok = checks.iter().all(|c| c.ok);
-    (if all_ok { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, Json(serde_json::json!({"ok": all_ok, "checks": checks}))).into_response()
+    (if all_ok { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, Json(serde_json::json!({"ok": all_ok, "checks": checks})))
+        .into_response()
 }
 
 #[derive(Deserialize)]
@@ -174,7 +205,9 @@ fn qr_json(s: &AppState) -> Value {
     let qr = mgr.qr();
     let url = qr.url.lock().unwrap().clone();
     let svg = url.and_then(|u| {
-        qrcode::QrCode::new(u.as_bytes()).ok().map(|c| c.render::<qrcode::render::svg::Color>().min_dimensions(300, 300).quiet_zone(false).build())
+        qrcode::QrCode::new(u.as_bytes())
+            .ok()
+            .map(|c| c.render::<qrcode::render::svg::Color>().min_dimensions(300, 300).quiet_zone(false).build())
     });
     let (status, message) = match mgr.qr_status() {
         QrStatus::Idle => ("idle", None),
@@ -205,7 +238,13 @@ mod tests {
     use tower_service::Service;
 
     fn test_state() -> AppState {
-        AppState { db: Db::open_in_memory().unwrap(), status: Arc::new(Status::default()), mgr: None, user_id: 1, avatars: std::env::temp_dir().join("tgh-test-avatars-none") }
+        AppState {
+            db: Db::open_in_memory().unwrap(),
+            status: Arc::new(Status::default()),
+            mgr: None,
+            user_id: 1,
+            avatars: std::env::temp_dir().join("tgh-test-avatars-none"),
+        }
     }
 
     fn app() -> Router {
@@ -236,7 +275,11 @@ mod tests {
     }
 
     async fn post(state: AppState, uri: &str, headers: &[(&str, &str)], body: &str) -> StatusCode {
-        let mut b = axum::http::Request::builder().method("POST").uri(uri).header("host", "localhost:8787").header("content-type", "application/json");
+        let mut b = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("host", "localhost:8787")
+            .header("content-type", "application/json");
         for (k, v) in headers {
             b = b.header(*k, *v);
         }
@@ -246,17 +289,35 @@ mod tests {
     #[tokio::test]
     async fn chats_api_toggles_and_blocks_cross_site() {
         let st = test_state();
-        st.db.call(|c| {
-            let uid = repo::ensure_user(c, 5)?;
-            assert_eq!(uid, 1);
-            repo::upsert_contact(c, uid, &repo::ContactRow { peer_id: 10, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "News".into(), username: None })
-        }).await.unwrap();
+        st.db
+            .call(|c| {
+                let uid = repo::ensure_user(c, 5)?;
+                assert_eq!(uid, 1);
+                repo::upsert_contact(
+                    c,
+                    uid,
+                    &repo::ContactRow {
+                        peer_id: 10,
+                        peer_kind: "channel".into(),
+                        is_bot: false,
+                        is_archived: false,
+                        display_name: "News".into(),
+                        username: None,
+                    },
+                )
+            })
+            .await
+            .unwrap();
         let ok = [("x-requested-with", "tgh")];
         assert_eq!(post(st.clone(), "/api/contacts/10", &ok, r#"{"news_source":true}"#).await, StatusCode::NO_CONTENT);
         assert_eq!(post(st.clone(), "/api/contacts/999", &ok, r#"{"mirror":false}"#).await, StatusCode::NOT_FOUND);
         // no custom header / foreign origin -> refused, and nothing changed
         assert_eq!(post(st.clone(), "/api/contacts/10", &[], r#"{"mirror":false}"#).await, StatusCode::FORBIDDEN);
-        assert_eq!(post(st.clone(), "/api/contacts/10", &[("x-requested-with", "tgh"), ("origin", "https://evil.example")], r#"{"mirror":false}"#).await, StatusCode::FORBIDDEN);
+        assert_eq!(
+            post(st.clone(), "/api/contacts/10", &[("x-requested-with", "tgh"), ("origin", "https://evil.example")], r#"{"mirror":false}"#)
+                .await,
+            StatusCode::FORBIDDEN
+        );
         let full = st.db.call(|c| repo::list_contacts_full(c, 1)).await.unwrap();
         assert!(full[0].is_news_source && full[0].mirror);
     }
@@ -274,7 +335,8 @@ mod tests {
         };
         assert_eq!(get(st.clone(), "/avatars/7").await, StatusCode::OK);
         assert_eq!(get(st.clone(), "/avatars/8").await, StatusCode::NOT_FOUND);
-        assert_eq!(get(st, "/avatars/..%2f..%2fetc%2fpasswd").await, StatusCode::BAD_REQUEST); // not an integer
+        assert_eq!(get(st, "/avatars/..%2f..%2fetc%2fpasswd").await, StatusCode::BAD_REQUEST);
+        // not an integer
     }
 
     #[tokio::test]
@@ -300,15 +362,27 @@ mod tests {
     async fn hostile_query_parameters_never_crash() {
         // non-numeric -> 400 from the extractor; numeric extremes are clamped in SQL helpers
         for uri in [
-            "/api/messages/daily?days=abc", "/api/messages/daily?days=", "/api/messages/daily?days=1.5", "/api/llm/daily?days=%00",
-            "/api/messages/top_chats?limit=NaN", "/api/events?limit=99999999999999999999999", "/api/messages/daily?days=7&days=8", // duplicate key
+            "/api/messages/daily?days=abc",
+            "/api/messages/daily?days=",
+            "/api/messages/daily?days=1.5",
+            "/api/llm/daily?days=%00",
+            "/api/messages/top_chats?limit=NaN",
+            "/api/events?limit=99999999999999999999999",
+            "/api/messages/daily?days=7&days=8", // duplicate key
         ] {
             assert_eq!(status_of("GET", uri, &[], vec![]).await, StatusCode::BAD_REQUEST, "{uri}");
         }
         for uri in [
-            "/api/messages/daily?days=-5", "/api/messages/daily?days=0", "/api/messages/daily?days=9223372036854775807", "/api/llm/by_purpose?days=-9223372036854775808",
-            "/api/events?limit=0", "/api/events?limit=-1", "/api/autoreply/recent?limit=9223372036854775807", "/api/messages/top_chats?days=7&limit=-3",
-            "/api/commitments?status=%27%3B%20DROP%20TABLE%20users%3B--", "/api/commitments?status=%F0%9F%98%80",
+            "/api/messages/daily?days=-5",
+            "/api/messages/daily?days=0",
+            "/api/messages/daily?days=9223372036854775807",
+            "/api/llm/by_purpose?days=-9223372036854775808",
+            "/api/events?limit=0",
+            "/api/events?limit=-1",
+            "/api/autoreply/recent?limit=9223372036854775807",
+            "/api/messages/top_chats?days=7&limit=-3",
+            "/api/commitments?status=%27%3B%20DROP%20TABLE%20users%3B--",
+            "/api/commitments?status=%F0%9F%98%80",
         ] {
             assert_eq!(status_of("GET", uri, &[], vec![]).await, StatusCode::OK, "{uri}");
         }
@@ -326,7 +400,10 @@ mod tests {
         assert_eq!(status_of("POST", "/api/contacts/1", &ok, b"{not json".to_vec()).await, StatusCode::BAD_REQUEST);
         assert_eq!(status_of("POST", "/api/contacts/1", &ok, br#"{"mirror":"yes"}"#.to_vec()).await, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(status_of("POST", "/api/contacts/abc", &ok, b"{}".to_vec()).await, StatusCode::BAD_REQUEST);
-        assert_eq!(status_of("POST", "/api/contacts/1", &[("x-requested-with", "tgh")], b"{}".to_vec()).await, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            status_of("POST", "/api/contacts/1", &[("x-requested-with", "tgh")], b"{}".to_vec()).await,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
         // oversized body is rejected by axum's default limit instead of being buffered
         assert_eq!(status_of("POST", "/api/contacts/1", &ok, vec![b' '; 3 * 1024 * 1024]).await, StatusCode::PAYLOAD_TOO_LARGE);
         // Host header variants
@@ -345,19 +422,41 @@ mod tests {
     #[tokio::test]
     async fn concurrent_requests_do_not_deadlock() {
         let st = test_state();
-        st.db.call(|c| {
-            let uid = repo::ensure_user(c, 5)?;
-            for i in 0..50 {
-                repo::save_message(c, uid, &repo::MessageRow { peer_id: 1, message_id: i, sender_id: None, sender_name: None, is_outgoing: i % 2 == 0, date: "2026-09-01 10:00:00".into(), kind: "text".into(), text: Some("x".into()) })?;
-            }
-            Ok(())
-        }).await.unwrap();
+        st.db
+            .call(|c| {
+                let uid = repo::ensure_user(c, 5)?;
+                for i in 0..50 {
+                    repo::save_message(
+                        c,
+                        uid,
+                        &repo::MessageRow {
+                            peer_id: 1,
+                            message_id: i,
+                            sender_id: None,
+                            sender_name: None,
+                            is_outgoing: i % 2 == 0,
+                            date: "2026-09-01 10:00:00".into(),
+                            kind: "text".into(),
+                            text: Some("x".into()),
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
         let router = router(st.clone());
         let mut tasks = Vec::new();
         for i in 0..300 {
             let mut r = router.clone();
             tasks.push(tokio::spawn(async move {
-                let uri = ["/api/overview", "/api/messages/daily?days=30", "/api/messages/hourly?days=7", "/api/events?limit=10", "/api/contacts"][i % 5];
+                let uri = [
+                    "/api/overview",
+                    "/api/messages/daily?days=30",
+                    "/api/messages/hourly?days=7",
+                    "/api/events?limit=10",
+                    "/api/contacts",
+                ][i % 5];
                 let req = axum::http::Request::builder().uri(uri).header("host", "localhost").body(Body::empty()).unwrap();
                 r.call(req).await.unwrap().status()
             }));
@@ -371,10 +470,24 @@ mod tests {
     async fn xss_payloads_are_returned_as_inert_json() {
         let st = test_state();
         let evil = "<img src=x onerror=alert(1)>\"'</script>";
-        st.db.call(move |c| {
-            let uid = repo::ensure_user(c, 5)?;
-            repo::upsert_contact(c, uid, &repo::ContactRow { peer_id: 1, peer_kind: "user".into(), is_bot: false, is_archived: false, display_name: evil.into(), username: Some(evil.into()) })
-        }).await.unwrap();
+        st.db
+            .call(move |c| {
+                let uid = repo::ensure_user(c, 5)?;
+                repo::upsert_contact(
+                    c,
+                    uid,
+                    &repo::ContactRow {
+                        peer_id: 1,
+                        peer_kind: "user".into(),
+                        is_bot: false,
+                        is_archived: false,
+                        display_name: evil.into(),
+                        username: Some(evil.into()),
+                    },
+                )
+            })
+            .await
+            .unwrap();
         let req = axum::http::Request::builder().uri("/api/contacts").header("host", "localhost").body(Body::empty()).unwrap();
         let resp = router(st).call(req).await.unwrap();
         assert!(resp.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));

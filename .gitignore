@@ -5,3 +5,10 @@ data/
 *.db-*
 zig/.zig-cache/
 zig/zig-out/
+.env.*
+!.env.example
+*.session
+*.session-journal
+*.bundle
+.DS_Store
+*.log

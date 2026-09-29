@@ -34,7 +34,12 @@ impl Config {
     /// Same as [`Config::from_env`] over any lookup (lets tests avoid touching the process environment).
     pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> anyhow::Result<Self> {
         use anyhow::Context;
-        let req = |k: &str| get(k).map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).with_context(|| format!("missing environment variable {k} (see .env.example)"));
+        let req = |k: &str| {
+            get(k)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .with_context(|| format!("missing environment variable {k} (see .env.example)"))
+        };
         let cfg = Self {
             bot_token: req("BOT_TOKEN")?,
             owner_telegram_id: req("OWNER_TELEGRAM_ID")?.parse().context("OWNER_TELEGRAM_ID must be a number (your Telegram user id)")?,
@@ -46,7 +51,9 @@ impl Config {
         };
         // Fail early and clearly instead of at the first use.
         crate::crypto::Crypto::new(&cfg.encryption_key).context("ENCRYPTION_KEY is not a valid Fernet key (32 url-safe base64 bytes)")?;
-        cfg.web_addr.parse::<std::net::SocketAddr>().with_context(|| format!("WEB_ADDR {:?} is not a socket address like 127.0.0.1:8787", cfg.web_addr))?;
+        cfg.web_addr
+            .parse::<std::net::SocketAddr>()
+            .with_context(|| format!("WEB_ADDR {:?} is not a socket address like 127.0.0.1:8787", cfg.web_addr))?;
         if cfg.api_id <= 0 {
             anyhow::bail!("TG_API_ID must be a positive number");
         }

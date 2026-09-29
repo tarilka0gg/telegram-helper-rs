@@ -61,7 +61,11 @@ impl Ctx {
                 }
             };
             // the chosen provider goes to the front, the others keep their default order
-            if Some(p) == Provider::parse(&primary) { ordered.insert(0, (p, plain)) } else { ordered.push((p, plain)) }
+            if Some(p) == Provider::parse(&primary) {
+                ordered.insert(0, (p, plain))
+            } else {
+                ordered.push((p, plain))
+            }
         }
         let mut it = ordered.into_iter();
         let Some((p, k)) = it.next() else { return Ok(None) };
@@ -122,7 +126,12 @@ pub(crate) mod testkit {
 
     /// The user-role message of an OpenAI-style request.
     pub fn user_text(req: &Value) -> String {
-        req["messages"].as_array().and_then(|m| m.iter().rev().find(|x| x["role"] == "user")).and_then(|m| m["content"].as_str()).unwrap_or("").to_string()
+        req["messages"]
+            .as_array()
+            .and_then(|m| m.iter().rev().find(|x| x["role"] == "user"))
+            .and_then(|m| m["content"].as_str())
+            .unwrap_or("")
+            .to_string()
     }
 
     pub fn reply(text: &str) -> (u16, Value) {

@@ -76,7 +76,20 @@ mod tests {
             tasks.push(tokio::spawn(async move {
                 for i in 0..250i64 {
                     db.call(move |c| {
-                        repo::save_message(c, 1, &repo::MessageRow { peer_id: w, message_id: i, sender_id: None, sender_name: None, is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "text".into(), text: Some(format!("m{w}-{i}")) })
+                        repo::save_message(
+                            c,
+                            1,
+                            &repo::MessageRow {
+                                peer_id: w,
+                                message_id: i,
+                                sender_id: None,
+                                sender_name: None,
+                                is_outgoing: false,
+                                date: "2026-01-01 10:00:00".into(),
+                                kind: "text".into(),
+                                text: Some(format!("m{w}-{i}")),
+                            },
+                        )
                     })
                     .await
                     .unwrap();
@@ -97,7 +110,8 @@ mod tests {
         }
         let n: i64 = db.call(|c| c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))).await.unwrap();
         assert_eq!(n, 2000);
-        let fts: i64 = db.call(|c| c.query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'm3'", [], |r| r.get(0))).await.unwrap();
+        let fts: i64 =
+            db.call(|c| c.query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'm3'", [], |r| r.get(0))).await.unwrap();
         assert!(fts >= 250);
     }
 }

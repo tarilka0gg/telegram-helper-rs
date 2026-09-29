@@ -68,8 +68,13 @@ mod tests {
 
     fn naive_cosine(q: &[f32], row: &[f32]) -> f32 {
         let dot: f64 = q.iter().zip(row).map(|(a, b)| f64::from(*a) * f64::from(*b)).sum();
-        let (nq, nr): (f64, f64) = (q.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt(), row.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt());
-        if nq * nr > 0.0 { (dot / (nq * nr)) as f32 } else { 0.0 }
+        let (nq, nr): (f64, f64) =
+            (q.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt(), row.iter().map(|a| f64::from(*a).powi(2)).sum::<f64>().sqrt());
+        if nq * nr > 0.0 {
+            (dot / (nq * nr)) as f32
+        } else {
+            0.0
+        }
     }
 
     /// Zig SIMD top-k must agree with a straightforward f64 implementation for every dimension
@@ -139,7 +144,8 @@ mod tests {
     /// Latin accents, Polish/Czech/Turkish letters and Greek.
     #[test]
     fn case_never_matters_for_supported_alphabets() {
-        let ranges: [(u32, u32); 7] = [(0x41, 0x5A), (0xC0, 0xDE), (0x100, 0x17F), (0x386, 0x3A9), (0x400, 0x42F), (0x460, 0x4FF), (0x500, 0x52F)];
+        let ranges: [(u32, u32); 7] =
+            [(0x41, 0x5A), (0xC0, 0xDE), (0x100, 0x17F), (0x386, 0x3A9), (0x400, 0x42F), (0x460, 0x4FF), (0x500, 0x52F)];
         let mut checked = 0;
         for (lo, hi) in ranges {
             for cp in lo..=hi {
@@ -195,7 +201,10 @@ mod tests {
         }
         let naive = t.elapsed();
         assert_eq!(top[0].0 as usize, best.0);
-        println!("cosine top-10 over {rows}x{dim}: zig {zig:?} vs naive f64 loop {naive:?} ({:.1}x)", naive.as_secs_f64() / zig.as_secs_f64());
+        println!(
+            "cosine top-10 over {rows}x{dim}: zig {zig:?} vs naive f64 loop {naive:?} ({:.1}x)",
+            naive.as_secs_f64() / zig.as_secs_f64()
+        );
         let names: Vec<String> = (0..5000).map(|i| format!("Контакт Номер {i} Іванов")).collect();
         let t = std::time::Instant::now();
         let mut hits = 0;

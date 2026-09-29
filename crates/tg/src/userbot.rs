@@ -9,8 +9,8 @@ use grammers_client::{
     client::UpdatesConfiguration,
     message::{InputMessage, Message},
     peer::Peer,
-    session::updates::UpdatesLike,
     sender::SenderPoolFatHandle,
+    session::updates::UpdatesLike,
     tl, Client, SenderPool,
 };
 use grammers_session::Session;
@@ -152,7 +152,9 @@ async fn on_message(ctx: &Arc<Ctx>, client: &Client, m: Message, edited: bool) -
             .call(move |c| {
                 if let Some(k) = contact {
                     // Keep flags we already know: archive state only changes through dialog sync.
-                    let archived = c.query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, k.peer_id], |r| r.get(0)).unwrap_or(false);
+                    let archived = c
+                        .query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, k.peer_id], |r| r.get(0))
+                        .unwrap_or(false);
                     repo::upsert_contact(c, uid, &ContactRow { is_archived: archived, ..k })?;
                 }
                 repo::save_message(c, uid, &row)
@@ -228,7 +230,9 @@ async fn maybe_auto_reply(ctx: &Arc<Ctx>, client: &Client, m: &Message, peer: &P
     let (archived, last): (bool, Option<String>) = ctx
         .db
         .call(move |c| {
-            let a = c.query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, peer_id], |r| r.get(0)).unwrap_or(false);
+            let a = c
+                .query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, peer_id], |r| r.get(0))
+                .unwrap_or(false);
             Ok((a, repo::last_auto_reply_at(c, uid, peer_id)?))
         })
         .await?;
@@ -277,7 +281,13 @@ async fn smart_reply(ctx: &Arc<Ctx>, s: &repo::Settings, peer_id: i64, name: &st
     let history = ctx.db.call(move |c| repo::recent_messages(c, uid, peer_id, 20)).await?;
     let history: String = history
         .iter()
-        .map(|h| format!("{}: {}", if h.is_outgoing { "Я" } else { h.sender_name.as_deref().unwrap_or("Собеседник") }, h.text.as_deref().unwrap_or("[медиа]")))
+        .map(|h| {
+            format!(
+                "{}: {}",
+                if h.is_outgoing { "Я" } else { h.sender_name.as_deref().unwrap_or("Собеседник") },
+                h.text.as_deref().unwrap_or("[медиа]")
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let prompt = format!("Собеседник: {name}.\nКонтекст последних сообщений:\n{history}\n\nПоследнее входящее: {incoming}\n\nСформируй ответ от моего имени.");
@@ -325,7 +335,12 @@ pub async fn peer_ref(peer: &Peer) -> Result<grammers_client::session::types::Pe
 }
 
 /// Latest messages of a chat straight from Telegram, oldest first. Nothing is written to the DB.
-pub async fn fetch_recent(client: &Client, pref: grammers_client::session::types::PeerRef, peer_id: i64, limit: usize) -> Result<Vec<MessageRow>> {
+pub async fn fetch_recent(
+    client: &Client,
+    pref: grammers_client::session::types::PeerRef,
+    peer_id: i64,
+    limit: usize,
+) -> Result<Vec<MessageRow>> {
     let mut iter = client.iter_messages(pref).limit(limit);
     let mut rows = Vec::new();
     while let Some(m) = iter.next().await.map_err(|e| anyhow::anyhow!("iter_messages: {e}"))? {
@@ -336,7 +351,13 @@ pub async fn fetch_recent(client: &Client, pref: grammers_client::session::types
 }
 
 /// Pulls the latest posts of one chat/channel into the DB (deduplicated by message id).
-pub async fn backfill_peer(ctx: &Arc<Ctx>, client: &Client, pref: grammers_client::session::types::PeerRef, peer_id: i64, limit: usize) -> Result<usize> {
+pub async fn backfill_peer(
+    ctx: &Arc<Ctx>,
+    client: &Client,
+    pref: grammers_client::session::types::PeerRef,
+    peer_id: i64,
+    limit: usize,
+) -> Result<usize> {
     let mut iter = client.iter_messages(pref).limit(limit);
     let mut rows = Vec::new();
     while let Some(m) = iter.next().await.map_err(|e| anyhow::anyhow!("iter_messages: {e}"))? {
@@ -372,7 +393,11 @@ pub fn spawn_avatar_download(ctx: Arc<Ctx>, client: Client, peers: Vec<Peer>) {
             let Some(id) = p.id().bare_id() else { continue };
             let path = avatar_path(&dir, id);
             // Cached for a week: profile pictures change, but rarely.
-            let fresh = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600));
+            let fresh = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600));
             if fresh {
                 continue;
             }

@@ -66,7 +66,12 @@ pub fn sanitize_html(input: &str) -> String {
                     if BLOCK.contains(&name.as_str()) {
                         newline(&mut out);
                     } else if KEEP.contains(&name.as_str()) {
-                        let norm = match name.as_str() { "strong" => "b", "em" => "i", "strike" => "s", n => n };
+                        let norm = match name.as_str() {
+                            "strong" => "b",
+                            "em" => "i",
+                            "strike" => "s",
+                            n => n,
+                        };
                         if closing {
                             out.push_str(&format!("</{norm}>"));
                         } else if norm == "a" {
@@ -75,7 +80,10 @@ pub fn sanitize_html(input: &str) -> String {
                                 ["http://", "https://", "tg://", "mailto:"].iter().any(|p| h.starts_with(p))
                             });
                             match safe {
-                                Some(h) => out.push_str(&format!("<a href=\"{}\">", h.replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;"))),
+                                Some(h) => out.push_str(&format!(
+                                    "<a href=\"{}\">",
+                                    h.replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;")
+                                )),
                                 None => out.push_str("<a>"),
                             }
                         } else {
@@ -114,7 +122,10 @@ fn parse_tag(s: &str) -> Option<(usize, bool, String, String)> {
         match (quote, c) {
             (None, '"' | '\'') => quote = Some(c),
             (Some(q), c) if c == q => quote = None,
-            (None, '>') => { end = Some(idx); break; }
+            (None, '>') => {
+                end = Some(idx);
+                break;
+            }
             _ => {}
         }
     }
@@ -178,9 +189,51 @@ mod tests {
         // Building blocks that stress the tokenizer: broken tags, quotes, entities, multi-byte and
         // case-folding-hostile characters (İ lowercases to two chars, ẞ, Σ, emoji, RTL).
         let atoms = [
-            "<", ">", "</", "<a href=\"", "<a href='", "javascript:", "JaVaScRiPt:", "https://x.y/?a=1&b=2", "\"", "'", "&", "&amp;", "&#39;", "&#", "&x",
-            "<b>", "</b>", "<script>", "</script>", "<img src=x onerror=alert(1)>", "<br/>", "<p>", "```", "```rust\n", "\n", "\n\n\n", " ", "=",
-            "İ", "ẞ", "Σ", "ǅ", "ß", "😀", "\u{202e}", "я", "字", "href", "HREF", "<A HREF=\"İhttps://a\">", "<a\thref=\"tg://x\">", "<é>", "<1>", "<-a>", "<a-b>",
+            "<",
+            ">",
+            "</",
+            "<a href=\"",
+            "<a href='",
+            "javascript:",
+            "JaVaScRiPt:",
+            "https://x.y/?a=1&b=2",
+            "\"",
+            "'",
+            "&",
+            "&amp;",
+            "&#39;",
+            "&#",
+            "&x",
+            "<b>",
+            "</b>",
+            "<script>",
+            "</script>",
+            "<img src=x onerror=alert(1)>",
+            "<br/>",
+            "<p>",
+            "```",
+            "```rust\n",
+            "\n",
+            "\n\n\n",
+            " ",
+            "=",
+            "İ",
+            "ẞ",
+            "Σ",
+            "ǅ",
+            "ß",
+            "😀",
+            "\u{202e}",
+            "я",
+            "字",
+            "href",
+            "HREF",
+            "<A HREF=\"İhttps://a\">",
+            "<a\thref=\"tg://x\">",
+            "<é>",
+            "<1>",
+            "<-a>",
+            "<a-b>",
         ];
         let mut x: u64 = 0x9E3779B97F4A7C15;
         let mut next = |m: usize| {

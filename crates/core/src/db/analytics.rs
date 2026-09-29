@@ -87,7 +87,11 @@ pub fn llm_by_purpose(c: &Connection, days: i64) -> Result<Value> {
         "SELECT purpose, count(*) AS n, sum(prompt_tokens + completion_tokens), avg(latency_ms)
          FROM llm_usage WHERE ts >= datetime('now', ?) GROUP BY purpose ORDER BY n DESC",
         [window(days)],
-        |r| Ok(json!({"purpose": r.get::<_, String>(0)?, "calls": r.get::<_, i64>(1)?, "tokens": r.get::<_, i64>(2)?, "avg_latency_ms": r.get::<_, f64>(3)?})),
+        |r| {
+            Ok(
+                json!({"purpose": r.get::<_, String>(0)?, "calls": r.get::<_, i64>(1)?, "tokens": r.get::<_, i64>(2)?, "avg_latency_ms": r.get::<_, f64>(3)?}),
+            )
+        },
     )
 }
 
@@ -97,7 +101,11 @@ pub fn autoreply_recent(c: &Connection, limit: i64) -> Result<Value> {
         "SELECT created_at, COALESCE(peer_name, ''), COALESCE(incoming_text, ''), reply_text
          FROM auto_reply_logs ORDER BY created_at DESC, id DESC LIMIT ?",
         [clamp(limit, 1, 500)],
-        |r| Ok(json!({"created_at": r.get::<_, String>(0)?, "peer_name": r.get::<_, String>(1)?, "incoming_text": r.get::<_, String>(2)?, "reply_text": r.get::<_, String>(3)?})),
+        |r| {
+            Ok(
+                json!({"created_at": r.get::<_, String>(0)?, "peer_name": r.get::<_, String>(1)?, "incoming_text": r.get::<_, String>(2)?, "reply_text": r.get::<_, String>(3)?}),
+            )
+        },
     )
 }
 
@@ -115,14 +123,12 @@ pub fn commitments(c: &Connection, status: &str) -> Result<Value> {
 }
 
 pub fn events(c: &Connection, limit: i64) -> Result<Value> {
-    rows(
-        c,
-        "SELECT ts, kind, peer_id, detail FROM events ORDER BY ts DESC, id DESC LIMIT ?",
-        [clamp(limit, 1, 500)],
-        |r| Ok(json!({"ts": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?, "peer_id": r.get::<_, Option<i64>>(2)?, "detail": r.get::<_, Option<String>>(3)?})),
-    )
+    rows(c, "SELECT ts, kind, peer_id, detail FROM events ORDER BY ts DESC, id DESC LIMIT ?", [clamp(limit, 1, 500)], |r| {
+        Ok(
+            json!({"ts": r.get::<_, String>(0)?, "kind": r.get::<_, String>(1)?, "peer_id": r.get::<_, Option<i64>>(2)?, "detail": r.get::<_, Option<String>>(3)?}),
+        )
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -136,7 +142,11 @@ mod tests {
         c.execute("INSERT INTO users(telegram_id) VALUES (1)", []).unwrap();
         c.execute("INSERT INTO contacts(user_id, peer_id, peer_kind, display_name) VALUES (1, 10, 'user', 'Olga')", []).unwrap();
         for (mid, out) in [(1, 0), (2, 0), (3, 1)] {
-            c.execute("INSERT INTO messages(user_id, peer_id, message_id, is_outgoing, date, text) VALUES (1, 10, ?, ?, datetime('now'), 'hi')", [mid, out]).unwrap();
+            c.execute(
+                "INSERT INTO messages(user_id, peer_id, message_id, is_outgoing, date, text) VALUES (1, 10, ?, ?, datetime('now'), 'hi')",
+                [mid, out],
+            )
+            .unwrap();
         }
         c.execute("INSERT INTO llm_usage(provider, model, purpose, prompt_tokens, completion_tokens, latency_ms, ok) VALUES ('openai', 'm', 'agent', 100, 50, 800, 1)", []).unwrap();
         c.execute("INSERT INTO llm_usage(provider, model, purpose, prompt_tokens, completion_tokens, latency_ms, ok) VALUES ('openai', 'm', 'agent', 10, 5, 200, 0)", []).unwrap();

@@ -18,9 +18,15 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
-    pub fn system(s: impl Into<String>) -> Self { Self { role: "system", content: s.into() } }
-    pub fn user(s: impl Into<String>) -> Self { Self { role: "user", content: s.into() } }
-    pub fn assistant(s: impl Into<String>) -> Self { Self { role: "assistant", content: s.into() } }
+    pub fn system(s: impl Into<String>) -> Self {
+        Self { role: "system", content: s.into() }
+    }
+    pub fn user(s: impl Into<String>) -> Self {
+        Self { role: "user", content: s.into() }
+    }
+    pub fn assistant(s: impl Into<String>) -> Self {
+        Self { role: "assistant", content: s.into() }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +51,12 @@ impl Provider {
         }
     }
     pub fn name(self) -> &'static str {
-        match self { Self::OpenAi => "openai", Self::Gemini => "gemini", Self::Groq => "groq", Self::Zai => "zai" }
+        match self {
+            Self::OpenAi => "openai",
+            Self::Gemini => "gemini",
+            Self::Groq => "groq",
+            Self::Zai => "zai",
+        }
     }
     fn default_base(self) -> &'static str {
         match self {
@@ -70,7 +81,11 @@ impl Provider {
         }
     }
     fn embed_model(self) -> Option<&'static str> {
-        match self { Self::OpenAi => Some(m::OPENAI_EMBED), Self::Gemini => Some(m::GEMINI_EMBED), _ => None }
+        match self {
+            Self::OpenAi => Some(m::OPENAI_EMBED),
+            Self::Gemini => Some(m::GEMINI_EMBED),
+            _ => None,
+        }
     }
 }
 
@@ -101,7 +116,10 @@ fn is_spent(provider: Provider, model: &str) -> bool {
 }
 
 fn mark_spent(provider: Provider, model: &str) {
-    spent().lock().unwrap_or_else(|e| e.into_inner()).insert(format!("{}/{model}", provider.name()), Instant::now() + Duration::from_secs(30 * 60));
+    spent()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(format!("{}/{model}", provider.name()), Instant::now() + Duration::from_secs(30 * 60));
 }
 
 /// A chain of providers: the first is tried first, the rest take over when it fails.
@@ -156,7 +174,11 @@ impl LlmClient {
                         last = Some(e);
                     }
                     Err(e) => {
-                        tracing::warn!("{}/{model} failed, trying the next provider: {}", entry.provider.name(), e.to_string().chars().take(120).collect::<String>().replace('\n', " "));
+                        tracing::warn!(
+                            "{}/{model} failed, trying the next provider: {}",
+                            entry.provider.name(),
+                            e.to_string().chars().take(120).collect::<String>().replace('\n', " ")
+                        );
                         last = Some(e);
                         break; // other errors are not model-specific: move on to the next provider
                     }
@@ -195,10 +217,17 @@ impl LlmClient {
         let req = if e.provider.openai_style() {
             self.http.post(format!("{}/chat/completions", e.base)).bearer_auth(&e.key).json(&openai_chat_body(model, messages))
         } else {
-            self.http.post(format!("{}/models/{model}:generateContent", e.base)).header("x-goog-api-key", &e.key).json(&gemini_chat_body(messages))
+            self.http
+                .post(format!("{}/models/{model}:generateContent", e.base))
+                .header("x-goog-api-key", &e.key)
+                .json(&gemini_chat_body(messages))
         };
         let v = send(req).await?;
-        if e.provider.openai_style() { parse_openai_chat(&v) } else { parse_gemini_chat(&v) }
+        if e.provider.openai_style() {
+            parse_openai_chat(&v)
+        } else {
+            parse_gemini_chat(&v)
+        }
     }
 
     async fn embed_inner(&self, e: &Entry, model: &str, text: &str) -> Result<Vec<f32>> {
@@ -221,7 +250,11 @@ impl LlmClient {
         for k in path {
             cur = cur.get(*k).or_else(|| k.parse::<usize>().ok().and_then(|i| cur.get(i))).context("embedding missing in response")?;
         }
-        cur.as_array().context("embedding is not an array")?.iter().map(|x| x.as_f64().map(|f| f as f32).context("non-numeric embedding")).collect()
+        cur.as_array()
+            .context("embedding is not an array")?
+            .iter()
+            .map(|x| x.as_f64().map(|f| f as f32).context("non-numeric embedding"))
+            .collect()
     }
 }
 
@@ -239,7 +272,10 @@ async fn send(req: reqwest::RequestBuilder) -> Result<Value> {
         let this = req.try_clone().context("request not cloneable")?;
         match send_once(this).await {
             Err(SendErr::Transient(e)) if attempt < 2 => {
-                tracing::warn!("LLM transient error, retrying in {delay:?}: {}", e.to_string().chars().take(100).collect::<String>().replace('\n', " "));
+                tracing::warn!(
+                    "LLM transient error, retrying in {delay:?}: {}",
+                    e.to_string().chars().take(100).collect::<String>().replace('\n', " ")
+                );
                 tokio::time::sleep(delay).await;
                 delay *= 3;
             }
@@ -300,7 +336,9 @@ pub fn parse_openai_chat(v: &Value) -> Result<Completion> {
 pub fn parse_gemini_chat(v: &Value) -> Result<Completion> {
     let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) else {
         // Blocked or cut off: say why instead of a bare "missing field".
-        let reason = v.pointer("/candidates/0/finishReason").and_then(Value::as_str)
+        let reason = v
+            .pointer("/candidates/0/finishReason")
+            .and_then(Value::as_str)
             .or_else(|| v.pointer("/promptFeedback/blockReason").and_then(Value::as_str))
             .unwrap_or("unknown");
         anyhow::bail!("Gemini returned no content (reason: {reason})");
@@ -321,7 +359,8 @@ mod tests {
     fn openai_roundtrip_shapes() {
         let body = openai_chat_body("gpt", &[ChatMessage::system("s"), ChatMessage::user("u")]);
         assert_eq!(body["messages"][1]["content"], "u");
-        let c = parse_openai_chat(&json!({"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}})).unwrap();
+        let c = parse_openai_chat(&json!({"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}))
+            .unwrap();
         assert_eq!(c, Completion { text: "hi".into(), prompt_tokens: 7, completion_tokens: 2 });
         assert!(parse_openai_chat(&json!({"error":"x"})).is_err());
         let blocked = parse_gemini_chat(&json!({"candidates":[{"finishReason":"SAFETY"}]})).unwrap_err().to_string();
@@ -340,19 +379,25 @@ mod tests {
     #[tokio::test]
     async fn retries_transient_503_then_succeeds() {
         use axum::{http::StatusCode, routing::post, Json, Router};
-        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
-        let app = Router::new().route("/chat/completions", post(move || {
-            let h = h.clone();
-            async move {
-                if h.fetch_add(1, Ordering::SeqCst) < 2 {
-                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"busy"})))
-                } else {
-                    (StatusCode::OK, Json(json!({"choices":[{"message":{"content":"ok"}}]})))
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move || {
+                let h = h.clone();
+                async move {
+                    if h.fetch_add(1, Ordering::SeqCst) < 2 {
+                        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"busy"})))
+                    } else {
+                        (StatusCode::OK, Json(json!({"choices":[{"message":{"content":"ok"}}]})))
+                    }
                 }
-            }
-        }));
+            }),
+        );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -365,7 +410,12 @@ mod tests {
     async fn chain_falls_through_to_next_provider() {
         use axum::{http::StatusCode, routing::post, Json, Router};
         let bad = Router::new().route("/chat/completions", post(|| async { (StatusCode::UNAUTHORIZED, Json(json!({"error":"bad key"}))) }));
-        let good = Router::new().route("/chat/completions", post(|| async { Json(json!({"choices":[{"message":{"content":"from groq"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}})) }));
+        let good = Router::new().route(
+            "/chat/completions",
+            post(|| async {
+                Json(json!({"choices":[{"message":{"content":"from groq"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}))
+            }),
+        );
         let mut bases = Vec::new();
         for app in [bad, good] {
             let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -373,13 +423,20 @@ mod tests {
             tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
         }
         let db = Db::open_in_memory().unwrap();
-        let llm = LlmClient::with_base(Provider::Zai, "k1".into(), db.clone(), &bases[0]).with_fallback_base(Provider::Groq, "k2".into(), &bases[1]);
+        let llm = LlmClient::with_base(Provider::Zai, "k1".into(), db.clone(), &bases[0]).with_fallback_base(
+            Provider::Groq,
+            "k2".into(),
+            &bases[1],
+        );
         assert_eq!(llm.chat("t", &[ChatMessage::user("x")], false).await.unwrap(), "from groq");
-        let rows: Vec<(String, bool)> = db.call(|c| {
-            let mut st = c.prepare("SELECT provider, ok FROM llm_usage ORDER BY id")?;
-            let r = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(r)
-        }).await.unwrap();
+        let rows: Vec<(String, bool)> = db
+            .call(|c| {
+                let mut st = c.prepare("SELECT provider, ok FROM llm_usage ORDER BY id")?;
+                let r = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(r)
+            })
+            .await
+            .unwrap();
         assert_eq!(rows, vec![("zai".to_string(), false), ("groq".to_string(), true)]);
     }
 
@@ -387,11 +444,14 @@ mod tests {
     #[tokio::test]
     async fn chat_records_usage_against_fake_server() {
         use axum::{http::HeaderMap, routing::post, Json, Router};
-        let app = Router::new().route("/chat/completions", post(|h: HeaderMap, Json(b): Json<Value>| async move {
-            assert_eq!(h["authorization"], "Bearer k");
-            assert_eq!(b["model"], m::OPENAI_CHAT_LIGHT);
-            Json(json!({"choices":[{"message":{"content":"pong"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}))
-        }));
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|h: HeaderMap, Json(b): Json<Value>| async move {
+                assert_eq!(h["authorization"], "Bearer k");
+                assert_eq!(b["model"], m::OPENAI_CHAT_LIGHT);
+                Json(json!({"choices":[{"message":{"content":"pong"}}],"usage":{"prompt_tokens":4,"completion_tokens":1}}))
+            }),
+        );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
@@ -399,7 +459,16 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let llm = LlmClient::with_base(Provider::OpenAi, "k".into(), db.clone(), &base);
         assert_eq!(llm.chat("test", &[ChatMessage::user("ping")], false).await.unwrap(), "pong");
-        let (n, tokens): (i64, i64) = db.call(|c| c.query_row("SELECT count(*), sum(prompt_tokens + completion_tokens) FROM llm_usage WHERE purpose='test' AND ok=1", [], |r| Ok((r.get(0)?, r.get(1)?)))).await.unwrap();
+        let (n, tokens): (i64, i64) = db
+            .call(|c| {
+                c.query_row(
+                    "SELECT count(*), sum(prompt_tokens + completion_tokens) FROM llm_usage WHERE purpose='test' AND ok=1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .await
+            .unwrap();
         assert_eq!((n, tokens), (1, 5));
         let bad = LlmClient::with_base(Provider::OpenAi, "k".into(), db.clone(), "http://127.0.0.1:1");
         assert!(bad.chat("test", &[ChatMessage::user("x")], false).await.is_err());
@@ -410,9 +479,18 @@ mod tests {
     #[test]
     fn response_parsers_reject_odd_shapes_without_panicking() {
         for v in [
-            json!(null), json!([]), json!("x"), json!({}), json!({"choices": []}), json!({"choices": [null]}), json!({"choices": [{"message": null}]}),
-            json!({"choices": [{"message": {"content": null}}]}), json!({"choices": [{"message": {"content": 5}}]}),
-            json!({"candidates": []}), json!({"candidates": [{"content": {"parts": "x"}}]}), json!({"candidates": [{"content": {"parts": [null, 5, {"text": 1}]}}]}),
+            json!(null),
+            json!([]),
+            json!("x"),
+            json!({}),
+            json!({"choices": []}),
+            json!({"choices": [null]}),
+            json!({"choices": [{"message": null}]}),
+            json!({"choices": [{"message": {"content": null}}]}),
+            json!({"choices": [{"message": {"content": 5}}]}),
+            json!({"candidates": []}),
+            json!({"candidates": [{"content": {"parts": "x"}}]}),
+            json!({"candidates": [{"content": {"parts": [null, 5, {"text": 1}]}}]}),
             json!({"usage": {"prompt_tokens": "many"}, "choices": [{"message": {"content": "ok"}}]}),
         ] {
             let _ = parse_openai_chat(&v);
@@ -427,8 +505,10 @@ mod tests {
     #[tokio::test]
     async fn html_error_pages_and_garbage_bodies_are_errors() {
         use axum::{routing::post, Router};
-        let app = Router::new()
-            .route("/chat/completions", post(|| async { ([(axum::http::header::CONTENT_TYPE, "text/html")], "<html>502 Bad Gateway</html>") }));
+        let app = Router::new().route(
+            "/chat/completions",
+            post(|| async { ([(axum::http::header::CONTENT_TYPE, "text/html")], "<html>502 Bad Gateway</html>") }),
+        );
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(l, app).await.unwrap() });

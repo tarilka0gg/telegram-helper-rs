@@ -5,8 +5,11 @@ use anyhow::{bail, Result};
 use grammers_client::{
     client::PasswordToken,
     peer::User,
-    session::{types::{PeerInfo, UpdateState, UpdatesState}, Session},
     sender::SenderPoolFatHandle,
+    session::{
+        types::{PeerInfo, UpdateState, UpdatesState},
+        Session,
+    },
     tl, Client, InvocationError,
 };
 
@@ -54,15 +57,39 @@ fn info_from(phone: &str, sc: tl::types::auth::SentCode) -> Result<CodeInfo> {
     if variant(format!("{:?}", sc.r#type)) == "SetUpEmailRequired" {
         bail!("{}", describe_type(&sc.r#type));
     }
-    Ok(CodeInfo { phone: phone.to_string(), hash: sc.phone_code_hash, via: describe_type(&sc.r#type), next: sc.next_type.as_ref().map(describe_next) })
+    Ok(CodeInfo {
+        phone: phone.to_string(),
+        hash: sc.phone_code_hash,
+        via: describe_type(&sc.r#type),
+        next: sc.next_type.as_ref().map(describe_next),
+    })
 }
 
 fn settings() -> tl::enums::CodeSettings {
-    tl::types::CodeSettings { allow_flashcall: false, current_number: false, allow_app_hash: false, allow_missed_call: false, allow_firebase: false, logout_tokens: None, token: None, app_sandbox: None, unknown_number: false }.into()
+    tl::types::CodeSettings {
+        allow_flashcall: false,
+        current_number: false,
+        allow_app_hash: false,
+        allow_missed_call: false,
+        allow_firebase: false,
+        logout_tokens: None,
+        token: None,
+        app_sandbox: None,
+        unknown_number: false,
+    }
+    .into()
 }
 
-pub async fn send_code(client: &Client, handle: &SenderPoolFatHandle, session: &DbSession, phone: &str, api_id: i32, api_hash: &str) -> Result<CodeInfo> {
-    let req = tl::functions::auth::SendCode { phone_number: phone.to_string(), api_id, api_hash: api_hash.to_string(), settings: settings() };
+pub async fn send_code(
+    client: &Client,
+    handle: &SenderPoolFatHandle,
+    session: &DbSession,
+    phone: &str,
+    api_id: i32,
+    api_hash: &str,
+) -> Result<CodeInfo> {
+    let req =
+        tl::functions::auth::SendCode { phone_number: phone.to_string(), api_id, api_hash: api_hash.to_string(), settings: settings() };
     let sent = match client.invoke(&req).await {
         Err(InvocationError::Rpc(e)) if e.code == 303 => {
             // The account lives on another data centre: switch home DC and ask again.
@@ -103,12 +130,18 @@ pub enum SignIn {
 }
 
 pub async fn sign_in(client: &Client, session: &DbSession, info: &CodeInfo, code: &str) -> Result<SignIn> {
-    let req = tl::functions::auth::SignIn { phone_number: info.phone.clone(), phone_code_hash: info.hash.clone(), phone_code: Some(code.to_string()), email_verification: None };
+    let req = tl::functions::auth::SignIn {
+        phone_number: info.phone.clone(),
+        phone_code_hash: info.hash.clone(),
+        phone_code: Some(code.to_string()),
+        email_verification: None,
+    };
     match client.invoke(&req).await {
         Ok(tl::enums::auth::Authorization::Authorization(a)) => Ok(SignIn::Done(Box::new(complete_login(client, session, a).await?))),
         Ok(tl::enums::auth::Authorization::SignUpRequired(_)) => Ok(SignIn::SignUpRequired),
         Err(e) if e.is("SESSION_PASSWORD_NEEDED") => {
-            let pw: tl::types::account::Password = client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
+            let pw: tl::types::account::Password =
+                client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
             Ok(SignIn::Password(Box::new(PasswordToken::new(pw))))
         }
         Err(e) if e.is("PHONE_CODE_*") => Ok(SignIn::InvalidCode),
@@ -121,9 +154,13 @@ pub async fn complete_login(client: &Client, session: &DbSession, auth: tl::type
     let state = client.invoke(&tl::functions::updates::GetState {}).await.ok();
     let user = User::from_raw(client, auth.user);
     let auth = user.to_ref().await.map_err(|e| anyhow::anyhow!("{e}"))?.ok_or_else(|| anyhow::anyhow!("no self ref"))?.auth;
-    session.cache_peer(&PeerInfo::User { id: user.id().bare_id_unchecked(), auth: Some(auth), bot: Some(user.is_bot()), is_self: Some(true) }).await?;
+    session
+        .cache_peer(&PeerInfo::User { id: user.id().bare_id_unchecked(), auth: Some(auth), bot: Some(user.is_bot()), is_self: Some(true) })
+        .await?;
     if let Some(tl::enums::updates::State::State(s)) = state {
-        session.set_update_state(UpdateState::All(UpdatesState { pts: s.pts, qts: s.qts, date: s.date, seq: s.seq, channels: Vec::new() })).await?;
+        session
+            .set_update_state(UpdateState::All(UpdatesState { pts: s.pts, qts: s.qts, date: s.date, seq: s.seq, channels: Vec::new() }))
+            .await?;
     }
     Ok(user)
 }
@@ -183,7 +220,8 @@ pub async fn qr_poll(client: &Client, session: &DbSession, api_id: i32, api_hash
 }
 
 async fn password_step(client: &Client) -> Result<QrPoll> {
-    let pw: tl::types::account::Password = client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
+    let pw: tl::types::account::Password =
+        client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
     Ok(QrPoll::Password(Box::new(PasswordToken::new(pw))))
 }
 

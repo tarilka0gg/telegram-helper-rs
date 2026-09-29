@@ -41,7 +41,9 @@ pub async fn build_with(ctx: &Arc<Ctx>, mgr: &Manager, topic: Option<&str>, llm:
     let uid = ctx.user_id;
     let sources = ctx.db.call(move |c| repo::news_sources(c, uid)).await?;
     if sources.is_empty() {
-        return Ok(News::Nothing("Немає каналів-джерел. Познач їх на сторінці /chats у веб-інтерфейсі або командою /sources Назва.".into()));
+        return Ok(News::Nothing(
+            "Немає каналів-джерел. Познач їх на сторінці /chats у веб-інтерфейсі або командою /sources Назва.".into(),
+        ));
     }
     if let Some(client) = mgr.client().await {
         for (peer_id, kind, name) in &sources {
@@ -81,12 +83,26 @@ pub async fn build_with(ctx: &Arc<Ctx>, mgr: &Manager, topic: Option<&str>, llm:
         }
     };
     let heavy = ctx.settings().await?.use_heavy_model;
-    let note = if fallback { "За добу нових постів немає — нижче останній наявний пост кожного каналу.\n\n" } else { "" };
+    let note = if fallback {
+        "За добу нових постів немає — нижче останній наявний пост кожного каналу.\n\n"
+    } else {
+        ""
+    };
     let body: String = posts.iter().map(format_post).collect::<Vec<_>>().join("\n\n");
     let head = topic.map(|t| format!("Тема: {t}\n\n")).unwrap_or_default();
-    let raw = llm.chat("news", &[ChatMessage::system(format!("{SYSTEM}{}", crate::features::UK)), ChatMessage::user(format!("{head}{note}{body}"))], heavy).await?;
+    let raw = llm
+        .chat(
+            "news",
+            &[ChatMessage::system(format!("{SYSTEM}{}", crate::features::UK)), ChatMessage::user(format!("{head}{note}{body}"))],
+            heavy,
+        )
+        .await?;
     let html = sanitize_html(&raw);
-    let html = if fallback { format!("<i>За добу нових постів немає — показую останні наявні.</i>\n\n{html}") } else { html };
+    let html = if fallback {
+        format!("<i>За добу нових постів немає — показую останні наявні.</i>\n\n{html}")
+    } else {
+        html
+    };
     Ok(News::Digest(NewsPack { html, posts: posts.iter().map(|p| (p.peer_id, p.message_id)).collect() }))
 }
 
@@ -112,11 +128,35 @@ mod tests {
         ctx.db
             .call(move |c| {
                 for (peer, name) in [(10i64, "Channel A"), (11, "Channel B")] {
-                    repo::upsert_contact(c, uid, &repo::ContactRow { peer_id: peer, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: name.into(), username: None })?;
+                    repo::upsert_contact(
+                        c,
+                        uid,
+                        &repo::ContactRow {
+                            peer_id: peer,
+                            peer_kind: "channel".into(),
+                            is_bot: false,
+                            is_archived: false,
+                            display_name: name.into(),
+                            username: None,
+                        },
+                    )?;
                     repo::update_contact_flags(c, uid, peer, Some(true), None, None)?;
                 }
                 for (peer, id, date, text) in &posts {
-                    repo::save_message(c, uid, &repo::MessageRow { peer_id: *peer, message_id: *id, sender_id: None, sender_name: None, is_outgoing: false, date: date.clone(), kind: "text".into(), text: Some(text.clone()) })?;
+                    repo::save_message(
+                        c,
+                        uid,
+                        &repo::MessageRow {
+                            peer_id: *peer,
+                            message_id: *id,
+                            sender_id: None,
+                            sender_name: None,
+                            is_outgoing: false,
+                            date: date.clone(),
+                            kind: "text".into(),
+                            text: Some(text.clone()),
+                        },
+                    )?;
                 }
                 Ok(())
             })

@@ -20,7 +20,7 @@ cargo run --release -p tgh-server
 cargo run -p tgh-server -- --demo      # dashboard with synthetic data, no credentials needed
 ```
 
-`zig` (0.15+) must be in `PATH` at build time. Sign in to the userbot from the control bot:
+`zig` 0.16+ (tested with 0.16.0) must be in `PATH` at build time. Sign in to the userbot from the control bot:
 `/login` (phone, code **with spaces**, 2FA) or `/qr` (scan the QR shown on `http://127.0.0.1:8787/login`).
 Then `/key <provider> <key>` (or the CLI below).
 
@@ -88,3 +88,11 @@ curl -X POST -H 'X-Requested-With: tgh' http://127.0.0.1:8787/api/selftest   # l
 
 The live self-test sends only read-only commands (`/status`, `/help`, `/settings`, `/topics`, `/search`, one free-text question)
 from your account to your own bot and checks the replies.
+
+## Origin and license
+
+A Rust rewrite of [Magerko/TelegramHelper](https://github.com/Magerko/TelegramHelper) (MIT). The intent-router prompts and the overall
+feature set come from the original; the code, schema extensions, web UI, Zig library and tests are new. Licensed under MIT — see `LICENSE`.
+Not affiliated with Telegram. Automating a user account is subject to Telegram's Terms of Service and API rules; use your own
+`api_id`/`api_hash` and keep request rates reasonable.
+

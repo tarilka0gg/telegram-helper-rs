@@ -7,23 +7,69 @@ use serde_json::Value;
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "intent", rename_all = "snake_case")]
 pub enum Intent {
-    SendMessage { recipient: String, text: String },
-    SummarizeChat { contact: String },
-    TasksForChat { contact: String },
-    DraftReply { contact: String, #[serde(default)] instruction: Option<String> },
-    Catchup { contact: String },
-    Search { query: String },
-    NewsDigest { topic: String, #[serde(default)] hours: Option<i64> },
+    SendMessage {
+        recipient: String,
+        text: String,
+    },
+    SummarizeChat {
+        contact: String,
+    },
+    TasksForChat {
+        contact: String,
+    },
+    DraftReply {
+        contact: String,
+        #[serde(default)]
+        instruction: Option<String>,
+    },
+    Catchup {
+        contact: String,
+    },
+    Search {
+        query: String,
+    },
+    NewsDigest {
+        topic: String,
+        #[serde(default)]
+        hours: Option<i64>,
+    },
     ListTodos,
-    SetSetting { key: String, value: Value },
-    FindInChats { query: String, #[serde(default)] action: Option<String> },
-    AddNewsTopic { topic: String, #[serde(default)] hours: Option<i64> },
-    RemoveNewsTopic { topic: String },
-    AddReminder { text: String, #[serde(default)] when: Option<String>, #[serde(default)] peer_query: Option<String> },
-    RemoveReminder { query: String },
-    AddRemindersFromChat { contact: String },
-    Chat { reply: String },
-    Multi { actions: Vec<Intent> },
+    SetSetting {
+        key: String,
+        value: Value,
+    },
+    FindInChats {
+        query: String,
+        #[serde(default)]
+        action: Option<String>,
+    },
+    AddNewsTopic {
+        topic: String,
+        #[serde(default)]
+        hours: Option<i64>,
+    },
+    RemoveNewsTopic {
+        topic: String,
+    },
+    AddReminder {
+        text: String,
+        #[serde(default)]
+        when: Option<String>,
+        #[serde(default)]
+        peer_query: Option<String>,
+    },
+    RemoveReminder {
+        query: String,
+    },
+    AddRemindersFromChat {
+        contact: String,
+    },
+    Chat {
+        reply: String,
+    },
+    Multi {
+        actions: Vec<Intent>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -59,9 +105,22 @@ pub fn flatten(intent: Intent) -> Vec<Intent> {
 }
 
 const SETTING_KEYS: &[&str] = &[
-    "auto_reply_enabled", "auto_reply_mode", "auto_reply_text", "auto_reply_cooldown_min", "digest_enabled",
-    "digest_time", "news_enabled", "news_digest_time", "news_window_hours", "reminders_enabled",
-    "reminder_lead_hours", "reminder_overdue_enabled", "ignore_archived", "use_heavy_model", "llm_provider", "timezone",
+    "auto_reply_enabled",
+    "auto_reply_mode",
+    "auto_reply_text",
+    "auto_reply_cooldown_min",
+    "digest_enabled",
+    "digest_time",
+    "news_enabled",
+    "news_digest_time",
+    "news_window_hours",
+    "reminders_enabled",
+    "reminder_lead_hours",
+    "reminder_overdue_enabled",
+    "ignore_archived",
+    "use_heavy_model",
+    "llm_provider",
+    "timezone",
 ];
 
 /// Whitelist of settings the agent may change; returns the canonical column name.
@@ -115,11 +174,27 @@ mod tests {
     #[test]
     fn parser_survives_garbage_and_type_confusion() {
         let cases = [
-            "", "{}", "[]", "null", "true", "\"intent\"", "{\"intent\":null}", "{\"intent\":5}", "{\"intent\":\"send_message\"}",
-            "{\"intent\":\"send_message\",\"recipient\":1,\"text\":[]}", "{\"intent\":\"multi\",\"actions\":\"no\"}",
-            "{\"intent\":\"multi\",\"actions\":[null,1,{}]}", "```", "```json", "```json\n```", "{\"intent\":\"chat\",\"reply\":\"\\ud800\"}",
-            &format!("{{\"intent\":\"chat\",\"reply\":\"{}\"}}", "я".repeat(100_000)), &"[".repeat(5000), &"{\"a\":".repeat(5000),
-            "{\"intent\":\"set_setting\",\"key\":\"digest_time\",\"value\":{\"nested\":[1,2]}}", "\u{feff}{\"intent\":\"list_todos\"}",
+            "",
+            "{}",
+            "[]",
+            "null",
+            "true",
+            "\"intent\"",
+            "{\"intent\":null}",
+            "{\"intent\":5}",
+            "{\"intent\":\"send_message\"}",
+            "{\"intent\":\"send_message\",\"recipient\":1,\"text\":[]}",
+            "{\"intent\":\"multi\",\"actions\":\"no\"}",
+            "{\"intent\":\"multi\",\"actions\":[null,1,{}]}",
+            "```",
+            "```json",
+            "```json\n```",
+            "{\"intent\":\"chat\",\"reply\":\"\\ud800\"}",
+            &format!("{{\"intent\":\"chat\",\"reply\":\"{}\"}}", "я".repeat(100_000)),
+            &"[".repeat(5000),
+            &"{\"a\":".repeat(5000),
+            "{\"intent\":\"set_setting\",\"key\":\"digest_time\",\"value\":{\"nested\":[1,2]}}",
+            "\u{feff}{\"intent\":\"list_todos\"}",
         ];
         for c in cases {
             let _ = flatten(parse_intent(c)); // must not panic or overflow the stack

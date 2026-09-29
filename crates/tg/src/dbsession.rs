@@ -3,7 +3,10 @@
 
 use std::{
     convert::Infallible,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
 };
 
 use grammers_session::{
@@ -151,7 +154,6 @@ impl Session for DbSession {
         })
     }
 }
-
 
 #[cfg(test)]
 mod tests {

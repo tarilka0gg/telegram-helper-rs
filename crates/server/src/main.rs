@@ -10,7 +10,10 @@ use tgh_tg::{bot, ctx::Ctx, manager::Manager};
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,grammers_mtsender=warn,grammers_client=warn,grammers_session=warn,grammers_mtproto=warn".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,grammers_mtsender=warn,grammers_client=warn,grammers_session=warn,grammers_mtproto=warn".into()),
+        )
         .init();
     if std::env::args().any(|a| a == "--demo") {
         let db = Db::open_in_memory()?;
@@ -18,7 +21,8 @@ async fn main() -> anyhow::Result<()> {
         let addr = std::env::var("WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
         let status = Arc::new(Status::default());
         status.userbot_connected.store(true, std::sync::atomic::Ordering::Relaxed);
-        return web::serve(&addr, web::AppState { db, status, mgr: None, user_id: 1, avatars: std::path::PathBuf::from("data/avatars") }).await;
+        return web::serve(&addr, web::AppState { db, status, mgr: None, user_id: 1, avatars: std::path::PathBuf::from("data/avatars") })
+            .await;
     }
     let cfg = Config::from_env()?;
     // `tgh-server key <openai|gemini>`: store an LLM key (read from stdin, never from argv).
@@ -34,7 +38,13 @@ async fn main() -> anyhow::Result<()> {
         let ctx = Ctx::new(cfg, db.clone(), Arc::new(Status::default())).await?;
         let Some(llm) = ctx.llm().await? else { anyhow::bail!("no LLM key stored") };
         let a = llm.chat("cli_ask", &[tgh_core::llm::ChatMessage::user(q)], false).await?;
-        let (prov, model): (String, String) = db.call(|c| c.query_row("SELECT provider, model FROM llm_usage WHERE ok = 1 ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))).await?;
+        let (prov, model): (String, String) = db
+            .call(|c| {
+                c.query_row("SELECT provider, model FROM llm_usage WHERE ok = 1 ORDER BY id DESC LIMIT 1", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+            })
+            .await?;
         println!("[{prov}/{model}] {}", a.trim());
         return Ok(());
     }
@@ -75,7 +85,11 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn store_key(cfg: &Config, provider: &str) -> anyhow::Result<()> {
-    use tgh_core::{crypto::Crypto, db::repo, llm::{LlmClient, Provider}};
+    use tgh_core::{
+        crypto::Crypto,
+        db::repo,
+        llm::{LlmClient, Provider},
+    };
     let Some(p) = Provider::parse(provider) else { anyhow::bail!("usage: echo KEY | tgh-server key <openai|gemini>") };
     let mut key = String::new();
     std::io::stdin().read_line(&mut key)?;
@@ -100,7 +114,11 @@ async fn store_key(cfg: &Config, provider: &str) -> anyhow::Result<()> {
 /// Reads `GEMINI_API_KEY`, `GROQ_API_KEY`, `ZAI_API_KEY`, `OPENAI_API_KEY` from a dotenv-style file.
 /// Keys are validated with a real request and stored encrypted; nothing secret is printed.
 async fn import_keys(cfg: &Config, path: &str) -> anyhow::Result<()> {
-    use tgh_core::{crypto::Crypto, db::repo, llm::{LlmClient, Provider}};
+    use tgh_core::{
+        crypto::Crypto,
+        db::repo,
+        llm::{LlmClient, Provider},
+    };
     let text = std::fs::read_to_string(path)?;
     let vars: std::collections::HashMap<&str, &str> = text
         .lines()
@@ -111,7 +129,12 @@ async fn import_keys(cfg: &Config, path: &str) -> anyhow::Result<()> {
     let db = Db::open(&cfg.db_path())?;
     let crypto = Crypto::new(&cfg.encryption_key)?;
     let owner = cfg.owner_telegram_id;
-    for (env, p) in [("GEMINI_API_KEY", Provider::Gemini), ("GROQ_API_KEY", Provider::Groq), ("ZAI_API_KEY", Provider::Zai), ("OPENAI_API_KEY", Provider::OpenAi)] {
+    for (env, p) in [
+        ("GEMINI_API_KEY", Provider::Gemini),
+        ("GROQ_API_KEY", Provider::Groq),
+        ("ZAI_API_KEY", Provider::Zai),
+        ("OPENAI_API_KEY", Provider::OpenAi),
+    ] {
         let Some(key) = vars.get(env).filter(|k| !k.is_empty()) else {
             println!("{:<7} not found in file", p.name());
             continue;

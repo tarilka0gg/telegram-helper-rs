@@ -9,7 +9,8 @@ use tgh_core::{db::repo, llm::ChatMessage};
 
 use crate::ctx::Ctx;
 
-pub const CATEGORIES: &[&str] = &["news", "work", "study", "friends", "family", "shopping", "tech", "entertainment", "finance", "groups", "other"];
+pub const CATEGORIES: &[&str] =
+    &["news", "work", "study", "friends", "family", "shopping", "tech", "entertainment", "finance", "groups", "other"];
 
 const SYSTEM: &str = "You sort a person's Telegram chats and channels into categories using their names, usernames and sample messages.\n\
 Categories (use exactly these words): news, work, study, friends, family, shopping, tech, entertainment, finance, groups, other.\n\
@@ -53,7 +54,13 @@ pub async fn run(ctx: &Arc<Ctx>, max: i64) -> Result<Option<(usize, usize)>> {
 }
 
 /// `pace` spaces requests out (per-minute quotas), `retry_wait` is the pause before retrying a rate-limited batch.
-pub async fn run_with(ctx: &Arc<Ctx>, llm: &tgh_core::llm::LlmClient, max: i64, pace: std::time::Duration, retry_wait: std::time::Duration) -> Result<(usize, usize)> {
+pub async fn run_with(
+    ctx: &Arc<Ctx>,
+    llm: &tgh_core::llm::LlmClient,
+    max: i64,
+    pace: std::time::Duration,
+    retry_wait: std::time::Duration,
+) -> Result<(usize, usize)> {
     let uid = ctx.user_id;
     let rows = ctx.db.call(move |c| repo::contacts_for_classification(c, uid, max)).await?;
     if rows.is_empty() {
@@ -77,7 +84,11 @@ pub async fn run_with(ctx: &Arc<Ctx>, llm: &tgh_core::llm::LlmClient, max: i64, 
             Ok(raw) => parse_answer(&raw, &asked),
             Err(e) => {
                 let msg = e.to_string();
-                tracing::warn!("classify batch of {} failed: {}", batch.len(), msg.chars().take(120).collect::<String>().replace('\n', " "));
+                tracing::warn!(
+                    "classify batch of {} failed: {}",
+                    batch.len(),
+                    msg.chars().take(120).collect::<String>().replace('\n', " ")
+                );
                 if msg.contains(tgh_core::llm::DAILY_QUOTA) {
                     tracing::warn!("classification paused: LLM daily quota spent (run /classify tomorrow)");
                     break;
@@ -133,7 +144,18 @@ mod tests {
         ctx.db
             .call(move |c| {
                 for (id, name, kind) in &rows {
-                    repo::upsert_contact(c, uid, &repo::ContactRow { peer_id: *id, peer_kind: kind.clone(), is_bot: false, is_archived: false, display_name: name.clone(), username: None })?;
+                    repo::upsert_contact(
+                        c,
+                        uid,
+                        &repo::ContactRow {
+                            peer_id: *id,
+                            peer_kind: kind.clone(),
+                            is_bot: false,
+                            is_archived: false,
+                            display_name: name.clone(),
+                            username: None,
+                        },
+                    )?;
                 }
                 Ok(())
             })
@@ -143,7 +165,12 @@ mod tests {
 
     async fn state(ctx: &Arc<Ctx>) -> Vec<(i64, Option<String>, bool, bool)> {
         let uid = ctx.user_id;
-        ctx.db.call(move |c| Ok(repo::list_contacts_full(c, uid)?.into_iter().map(|k| (k.peer_id, k.category, k.is_news_source, k.mirror)).collect())).await.unwrap()
+        ctx.db
+            .call(move |c| {
+                Ok(repo::list_contacts_full(c, uid)?.into_iter().map(|k| (k.peer_id, k.category, k.is_news_source, k.mirror)).collect())
+            })
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -151,12 +178,21 @@ mod tests {
         let ctx = ctx().await;
         seed(&ctx, &[(1, "Daily News UA", "channel"), (2, "Mama", "user"), (3, "Memes", "channel"), (4, "Work chat", "supergroup")]).await;
         let base = fake_llm(|req| {
-            let items: Vec<String> = ids(&user_text(&req)).into_iter().map(|id| {
-                let (cat, news) = match id { 1 => ("news", true), 2 => ("family", false), 3 => ("entertainment", false), _ => ("news", true) }; // a group wrongly called news
-                format!(r#"{{"id":{id},"category":"{cat}","news":{news}}}"#)
-            }).collect();
+            let items: Vec<String> = ids(&user_text(&req))
+                .into_iter()
+                .map(|id| {
+                    let (cat, news) = match id {
+                        1 => ("news", true),
+                        2 => ("family", false),
+                        3 => ("entertainment", false),
+                        _ => ("news", true),
+                    }; // a group wrongly called news
+                    format!(r#"{{"id":{id},"category":"{cat}","news":{news}}}"#)
+                })
+                .collect();
             reply(&format!("[{}]", items.join(",")))
-        }).await;
+        })
+        .await;
         let llm = LlmClient::with_base(Provider::Groq, "k".into(), ctx.db.clone(), &base);
         let (done, news) = run_with(&ctx, &llm, 100, std::time::Duration::ZERO, std::time::Duration::ZERO).await.unwrap();
         assert_eq!((done, news), (4, 1)); // only the real channel became a source; the group was not counted
@@ -166,7 +202,7 @@ mod tests {
         assert_eq!(get(2).1.as_deref(), Some("family"));
         assert_eq!(get(3), (3, Some("entertainment".into()), false, false)); // entertainment -> not mirrored by default
         assert_eq!(get(4), (4, Some("news".into()), false, true)); // a group is never auto-marked as a source
-        // second run has nothing left to do and must not call the model again
+                                                                   // second run has nothing left to do and must not call the model again
         let (done2, _) = run_with(&ctx, &llm, 100, std::time::Duration::ZERO, std::time::Duration::ZERO).await.unwrap();
         assert_eq!(done2, 0);
     }
@@ -174,22 +210,26 @@ mod tests {
     #[tokio::test]
     async fn bisects_around_a_refused_name_and_parks_it() {
         let ctx = ctx().await;
-        seed(&ctx, &[(1, "Good A", "user"), (2, "Good B", "user"), (3, "FORBIDDEN", "user"), (4, "Good C", "user"), (5, "Good D", "user")]).await;
+        seed(&ctx, &[(1, "Good A", "user"), (2, "Good B", "user"), (3, "FORBIDDEN", "user"), (4, "Good C", "user"), (5, "Good D", "user")])
+            .await;
         let base = fake_llm(|req| {
             let prompt = user_text(&req);
             if prompt.contains("FORBIDDEN") {
                 return reply(""); // the provider refuses any batch containing this name
             }
-            let items: Vec<String> = ids(&prompt).into_iter().map(|id| format!(r#"{{"id":{id},"category":"friends","news":false}}"#)).collect();
+            let items: Vec<String> =
+                ids(&prompt).into_iter().map(|id| format!(r#"{{"id":{id},"category":"friends","news":false}}"#)).collect();
             reply(&format!("[{}]", items.join(",")))
-        }).await;
+        })
+        .await;
         let llm = LlmClient::with_base(Provider::Groq, "k".into(), ctx.db.clone(), &base);
         run_with(&ctx, &llm, 100, std::time::Duration::ZERO, std::time::Duration::ZERO).await.unwrap();
         let st = state(&ctx).await;
         for id in [1, 2, 4, 5] {
             assert_eq!(st.iter().find(|s| s.0 == id).unwrap().1.as_deref(), Some("friends"), "id {id}");
         }
-        assert_eq!(st.iter().find(|s| s.0 == 3).unwrap().1.as_deref(), Some("other")); // parked, not retried forever
+        assert_eq!(st.iter().find(|s| s.0 == 3).unwrap().1.as_deref(), Some("other"));
+        // parked, not retried forever
     }
 
     #[tokio::test]

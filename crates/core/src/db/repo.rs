@@ -74,9 +74,22 @@ pub fn settings(c: &Connection, user_id: i64) -> Result<Settings> {
 
 /// Columns that `set_setting` may touch — a whitelist, since the name is spliced into SQL.
 const SETTING_COLUMNS: &[&str] = &[
-    "auto_reply_enabled", "auto_reply_mode", "auto_reply_text", "auto_reply_cooldown_min", "llm_provider",
-    "use_heavy_model", "timezone", "digest_enabled", "digest_time", "reminders_enabled", "reminder_lead_hours",
-    "reminder_overdue_enabled", "news_enabled", "news_window_hours", "news_digest_time", "ignore_archived",
+    "auto_reply_enabled",
+    "auto_reply_mode",
+    "auto_reply_text",
+    "auto_reply_cooldown_min",
+    "llm_provider",
+    "use_heavy_model",
+    "timezone",
+    "digest_enabled",
+    "digest_time",
+    "reminders_enabled",
+    "reminder_lead_hours",
+    "reminder_overdue_enabled",
+    "news_enabled",
+    "news_window_hours",
+    "news_digest_time",
+    "ignore_archived",
 ];
 
 pub fn set_setting(c: &Connection, user_id: i64, column: &str, value: rusqlite::types::Value) -> Result<bool> {
@@ -89,7 +102,15 @@ pub fn set_setting(c: &Connection, user_id: i64, column: &str, value: rusqlite::
 
 // ---- secrets (already encrypted by the caller) -----------------------------
 
-pub fn save_session(c: &Connection, user_id: i64, api_id: i64, api_hash_enc: &str, session_enc: &str, phone: &str, label: Option<&str>) -> Result<()> {
+pub fn save_session(
+    c: &Connection,
+    user_id: i64,
+    api_id: i64,
+    api_hash_enc: &str,
+    session_enc: &str,
+    phone: &str,
+    label: Option<&str>,
+) -> Result<()> {
     c.execute(
         "INSERT INTO telegram_sessions(user_id, api_id, api_hash_enc, session_string_enc, phone, account_label)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -105,11 +126,9 @@ pub fn update_session_blob(c: &Connection, user_id: i64, session_enc: &str) -> R
 }
 
 pub fn load_session(c: &Connection, user_id: i64) -> Result<Option<(i64, String, String)>> {
-    c.query_row(
-        "SELECT api_id, api_hash_enc, session_string_enc FROM telegram_sessions WHERE user_id = ?",
-        [user_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )
+    c.query_row("SELECT api_id, api_hash_enc, session_string_enc FROM telegram_sessions WHERE user_id = ?", [user_id], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })
     .optional()
 }
 
@@ -128,8 +147,7 @@ pub fn set_api_key(c: &Connection, user_id: i64, provider: &str, key_enc: &str) 
 }
 
 pub fn get_api_key(c: &Connection, user_id: i64, provider: &str) -> Result<Option<String>> {
-    c.query_row("SELECT key_enc FROM api_keys WHERE user_id = ? AND provider = ?", params![user_id, provider], |r| r.get(0))
-        .optional()
+    c.query_row("SELECT key_enc FROM api_keys WHERE user_id = ? AND provider = ?", params![user_id, provider], |r| r.get(0)).optional()
 }
 
 // ---- contacts & messages ---------------------------------------------------
@@ -159,7 +177,14 @@ pub fn list_contacts(c: &Connection, user_id: i64) -> Result<Vec<ContactRow>> {
         "SELECT peer_id, peer_kind, is_bot, is_archived, display_name, username FROM contacts WHERE user_id = ? ORDER BY display_name",
     )?;
     let rows = st.query_map([user_id], |r| {
-        Ok(ContactRow { peer_id: r.get(0)?, peer_kind: r.get(1)?, is_bot: r.get(2)?, is_archived: r.get(3)?, display_name: r.get(4)?, username: r.get(5)? })
+        Ok(ContactRow {
+            peer_id: r.get(0)?,
+            peer_kind: r.get(1)?,
+            is_bot: r.get(2)?,
+            is_archived: r.get(3)?,
+            display_name: r.get(4)?,
+            username: r.get(5)?,
+        })
     })?;
     rows.collect()
 }
@@ -200,8 +225,16 @@ pub fn recent_messages(c: &Connection, user_id: i64, peer_id: i64, limit: i64) -
     )?;
     let mut rows = st
         .query_map(params![user_id, peer_id, limit], |r| {
-            Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?,
-                is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+            Ok(MessageRow {
+                peer_id: r.get(0)?,
+                message_id: r.get(1)?,
+                sender_id: r.get(2)?,
+                sender_name: r.get(3)?,
+                is_outgoing: r.get(4)?,
+                date: r.get(5)?,
+                kind: r.get(6)?,
+                text: r.get(7)?,
+            })
         })?
         .collect::<Result<Vec<_>>>()?;
     rows.reverse(); // chronological
@@ -210,12 +243,8 @@ pub fn recent_messages(c: &Connection, user_id: i64, peer_id: i64, limit: i64) -
 
 /// FTS5 search. The user's text is turned into a safe query of quoted terms.
 pub fn search_messages(c: &Connection, user_id: i64, query: &str, limit: i64) -> Result<Vec<MessageRow>> {
-    let fts: String = query
-        .split_whitespace()
-        .map(|w| format!("\"{}\"", w.replace('"', "")))
-        .filter(|w| w != "\"\"")
-        .collect::<Vec<_>>()
-        .join(" ");
+    let fts: String =
+        query.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', ""))).filter(|w| w != "\"\"").collect::<Vec<_>>().join(" ");
     if fts.is_empty() {
         return Ok(vec![]);
     }
@@ -225,15 +254,31 @@ pub fn search_messages(c: &Connection, user_id: i64, query: &str, limit: i64) ->
          WHERE messages_fts MATCH ?1 AND m.user_id = ?2 ORDER BY m.date DESC LIMIT ?3",
     )?;
     let rows = st.query_map(params![fts, user_id, limit], |r| {
-        Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?,
-            is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+        Ok(MessageRow {
+            peer_id: r.get(0)?,
+            message_id: r.get(1)?,
+            sender_id: r.get(2)?,
+            sender_name: r.get(3)?,
+            is_outgoing: r.get(4)?,
+            date: r.get(5)?,
+            kind: r.get(6)?,
+            text: r.get(7)?,
+        })
     })?;
     rows.collect()
 }
 
 // ---- commitments -----------------------------------------------------------
 
-pub fn add_commitment(c: &Connection, user_id: i64, peer_id: i64, peer_name: &str, direction: &str, text: &str, deadline: Option<&str>) -> Result<i64> {
+pub fn add_commitment(
+    c: &Connection,
+    user_id: i64,
+    peer_id: i64,
+    peer_name: &str,
+    direction: &str,
+    text: &str,
+    deadline: Option<&str>,
+) -> Result<i64> {
     c.execute(
         "INSERT INTO commitments(user_id, peer_id, peer_name, direction, text, deadline_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![user_id, peer_id, peer_name, direction, text, deadline],
@@ -264,7 +309,16 @@ pub fn open_commitments(c: &Connection, user_id: i64, direction: Option<&str>) -
          ORDER BY deadline_at IS NULL, deadline_at, id",
     )?;
     let rows = st.query_map(params![user_id, direction], |r| {
-        Ok(CommitmentRow { id: r.get(0)?, peer_id: r.get(1)?, peer_name: r.get(2)?, direction: r.get(3)?, text: r.get(4)?, deadline_at: r.get(5)?, status: r.get(6)?, created_at: r.get(7)? })
+        Ok(CommitmentRow {
+            id: r.get(0)?,
+            peer_id: r.get(1)?,
+            peer_name: r.get(2)?,
+            direction: r.get(3)?,
+            text: r.get(4)?,
+            deadline_at: r.get(5)?,
+            status: r.get(6)?,
+            created_at: r.get(7)?,
+        })
     })?;
     rows.collect()
 }
@@ -285,7 +339,8 @@ pub fn waiting_for_reply(c: &Connection, user_id: i64, since: &str, limit: i64) 
 }
 
 pub fn auto_replies_since(c: &Connection, user_id: i64, since: &str) -> Result<Vec<String>> {
-    let mut st = c.prepare("SELECT COALESCE(peer_name, CAST(peer_id AS TEXT)) FROM auto_reply_logs WHERE user_id = ? AND created_at >= ?")?;
+    let mut st =
+        c.prepare("SELECT COALESCE(peer_name, CAST(peer_id AS TEXT)) FROM auto_reply_logs WHERE user_id = ? AND created_at >= ?")?;
     let rows = st.query_map(params![user_id, since], |r| r.get(0))?;
     rows.collect()
 }
@@ -317,7 +372,10 @@ pub fn pending_add(c: &Connection, user_id: i64, kind: &str, payload: &str) -> R
 }
 
 pub fn pending_get(c: &Connection, user_id: i64, id: i64) -> Result<Option<(String, String)>> {
-    c.query_row("SELECT kind, payload FROM pending_actions WHERE id = ? AND user_id = ?", params![id, user_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+    c.query_row("SELECT kind, payload FROM pending_actions WHERE id = ? AND user_id = ?", params![id, user_id], |r| {
+        Ok((r.get(0)?, r.get(1)?))
+    })
+    .optional()
 }
 
 pub fn pending_set_payload(c: &Connection, user_id: i64, id: i64, payload: &str) -> Result<()> {
@@ -365,14 +423,24 @@ pub fn news_messages(c: &Connection, user_id: i64, topic: &str, since: &str, lim
          ORDER BY m.date DESC LIMIT ?4",
     )?;
     let rows = st.query_map(params![user_id, since, topic, limit], |r| {
-        Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?, is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+        Ok(MessageRow {
+            peer_id: r.get(0)?,
+            message_id: r.get(1)?,
+            sender_id: r.get(2)?,
+            sender_name: r.get(3)?,
+            is_outgoing: r.get(4)?,
+            date: r.get(5)?,
+            kind: r.get(6)?,
+            text: r.get(7)?,
+        })
     })?;
     rows.collect()
 }
 
 /// Chats that mention `query` most (global FTS), for "which chat was that?": (peer_id, name, hits).
 pub fn chats_matching(c: &Connection, user_id: i64, query: &str, limit: i64) -> Result<Vec<(i64, String, i64)>> {
-    let fts: String = query.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', ""))).filter(|w| w != "\"\"").collect::<Vec<_>>().join(" OR ");
+    let fts: String =
+        query.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', ""))).filter(|w| w != "\"\"").collect::<Vec<_>>().join(" OR ");
     if fts.is_empty() {
         return Ok(vec![]);
     }
@@ -408,7 +476,8 @@ pub fn event_since(c: &Connection, kind: &str, since: &str, detail: Option<&str>
 }
 
 /// SQL predicate on a `contacts` alias `k`: true when the chat is archived and the owner ignores archives.
-const HIDDEN_ARCHIVED: &str = "(k.is_archived = 1 AND COALESCE((SELECT ignore_archived FROM user_settings u WHERE u.user_id = k.user_id), 1) = 1)";
+const HIDDEN_ARCHIVED: &str =
+    "(k.is_archived = 1 AND COALESCE((SELECT ignore_archived FROM user_settings u WHERE u.user_id = k.user_id), 1) = 1)";
 
 /// Categories whose chats are NOT mirrored by default (set when the classifier files a chat there).
 pub const DEFAULT_OFF_CATEGORIES: &[&str] = &["entertainment"];
@@ -436,13 +505,31 @@ pub fn list_contacts_full(c: &Connection, user_id: i64) -> Result<Vec<ContactFul
          FROM contacts k WHERE k.user_id = ?1 AND NOT {HIDDEN_ARCHIVED} ORDER BY k.is_news_source DESC, k.display_name COLLATE NOCASE",
     ))?;
     let rows = st.query_map([user_id], |r| {
-        Ok(ContactFull { peer_id: r.get(0)?, name: r.get(1)?, username: r.get(2)?, kind: r.get(3)?, category: r.get(4)?, is_news_source: r.get(5)?, mirror: r.get(6)?, is_archived: r.get(7)?, is_bot: r.get(8)?, messages: r.get(9)? })
+        Ok(ContactFull {
+            peer_id: r.get(0)?,
+            name: r.get(1)?,
+            username: r.get(2)?,
+            kind: r.get(3)?,
+            category: r.get(4)?,
+            is_news_source: r.get(5)?,
+            mirror: r.get(6)?,
+            is_archived: r.get(7)?,
+            is_bot: r.get(8)?,
+            messages: r.get(9)?,
+        })
     })?;
     rows.collect()
 }
 
 /// Partial update from the web UI; only the given fields change. `category` is length-limited.
-pub fn update_contact_flags(c: &Connection, user_id: i64, peer_id: i64, news_source: Option<bool>, mirror: Option<bool>, category: Option<&str>) -> Result<bool> {
+pub fn update_contact_flags(
+    c: &Connection,
+    user_id: i64,
+    peer_id: i64,
+    news_source: Option<bool>,
+    mirror: Option<bool>,
+    category: Option<&str>,
+) -> Result<bool> {
     let n = c.execute(
         "UPDATE contacts SET is_news_source = COALESCE(?1, is_news_source), mirror = COALESCE(?2, mirror), category = COALESCE(?3, category)
          WHERE user_id = ?4 AND peer_id = ?5",
@@ -475,7 +562,16 @@ const NEWS_FROM: &str = "FROM messages m
       AND NOT EXISTS (SELECT 1 FROM news_sent s WHERE s.user_id = m.user_id AND s.peer_id = m.peer_id AND s.message_id = m.message_id)";
 
 fn news_row(r: &Row) -> Result<MessageRow> {
-    Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?, is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+    Ok(MessageRow {
+        peer_id: r.get(0)?,
+        message_id: r.get(1)?,
+        sender_id: r.get(2)?,
+        sender_name: r.get(3)?,
+        is_outgoing: r.get(4)?,
+        date: r.get(5)?,
+        kind: r.get(6)?,
+        text: r.get(7)?,
+    })
 }
 
 /// Posts from news sources since `since` that were never included in a digest.
@@ -521,7 +617,11 @@ pub type ClassifyRow = (i64, String, Option<String>, String, Vec<String>);
 
 pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> Result<Vec<ClassifyRow>> {
     let mut st = c.prepare(&format!("SELECT k.peer_id, k.display_name, k.username, k.peer_kind FROM contacts k WHERE k.user_id = ?1 AND k.is_bot = 0 AND k.category IS NULL AND NOT {HIDDEN_ARCHIVED} ORDER BY k.display_name LIMIT ?2"))?;
-    let base = st.query_map(params![user_id, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))?.collect::<Result<Vec<_>>>()?;
+    let base = st
+        .query_map(params![user_id, limit], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
     let mut snip = c.prepare("SELECT substr(text, 1, 120) FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND text IS NOT NULL AND trim(text) <> '' ORDER BY date DESC LIMIT 3")?;
     let mut out = Vec::with_capacity(base.len());
     for (id, name, user, kind) in base {
@@ -539,7 +639,11 @@ pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String,
     let (mut done, mut sources) = (0, 0);
     for (peer_id, category, news) in items {
         let kind: Option<String> = c
-            .query_row("SELECT peer_kind FROM contacts WHERE user_id = ?1 AND peer_id = ?2 AND category IS NULL", params![user_id, peer_id], |r| r.get(0))
+            .query_row(
+                "SELECT peer_kind FROM contacts WHERE user_id = ?1 AND peer_id = ?2 AND category IS NULL",
+                params![user_id, peer_id],
+                |r| r.get(0),
+            )
             .optional()?;
         let n = c.execute(
             "UPDATE contacts SET category = ?1, is_news_source = CASE WHEN ?2 AND peer_kind = 'channel' THEN 1 ELSE is_news_source END,
@@ -584,7 +688,16 @@ pub fn log_event(c: &Connection, kind: &str, peer_id: Option<i64>, detail: Optio
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn log_llm_usage(c: &Connection, provider: &str, model: &str, purpose: &str, prompt: i64, completion: i64, latency_ms: i64, ok: bool) -> Result<()> {
+pub fn log_llm_usage(
+    c: &Connection,
+    provider: &str,
+    model: &str,
+    purpose: &str,
+    prompt: i64,
+    completion: i64,
+    latency_ms: i64,
+    ok: bool,
+) -> Result<()> {
     c.execute(
         "INSERT INTO llm_usage(provider, model, purpose, prompt_tokens, completion_tokens, latency_ms, ok) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![provider, model, purpose, prompt, completion, latency_ms, ok],
@@ -619,8 +732,16 @@ mod tests {
     fn messages_dedupe_search_and_history() {
         let c = db();
         let u = ensure_user(&c, 1).unwrap();
-        let m = |id: i64, text: &str| MessageRow { peer_id: 5, message_id: id, sender_id: None, sender_name: Some("Оля".into()),
-            is_outgoing: id % 2 == 0, date: format!("2026-01-01 10:0{id}:00"), kind: "text".into(), text: Some(text.into()) };
+        let m = |id: i64, text: &str| MessageRow {
+            peer_id: 5,
+            message_id: id,
+            sender_id: None,
+            sender_name: Some("Оля".into()),
+            is_outgoing: id % 2 == 0,
+            date: format!("2026-01-01 10:0{id}:00"),
+            kind: "text".into(),
+            text: Some(text.into()),
+        };
         assert!(save_message(&c, u, &m(1, "купи молоко")).unwrap());
         assert!(save_message(&c, u, &m(2, "ок, куплю")).unwrap());
         save_message(&c, u, &m(1, "купи молоко")).unwrap(); // duplicate
@@ -628,11 +749,30 @@ mod tests {
         assert_eq!(recent_messages(&c, u, 5, 10).unwrap()[0].message_id, 1);
         // last incoming (id 1, 10:01) is answered by outgoing id 2 (10:02) -> nobody is waiting
         assert!(waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap().is_empty());
-        save_message(&c, u, &MessageRow { message_id: 3, is_outgoing: false, date: "2026-01-01 10:05:00".into(), text: Some("ти де?".into()), ..m(3, "") }).unwrap();
+        save_message(
+            &c,
+            u,
+            &MessageRow {
+                message_id: 3, is_outgoing: false, date: "2026-01-01 10:05:00".into(), text: Some("ти де?".into()), ..m(3, "")
+            },
+        )
+        .unwrap();
         let w = waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap();
         assert_eq!((w.len(), w[0].2.as_str()), (1, "ти де?"));
         // a channel post must not count as "waiting for your reply"
-        upsert_contact(&c, u, &ContactRow { peer_id: 77, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Chan".into(), username: None }).unwrap();
+        upsert_contact(
+            &c,
+            u,
+            &ContactRow {
+                peer_id: 77,
+                peer_kind: "channel".into(),
+                is_bot: false,
+                is_archived: false,
+                display_name: "Chan".into(),
+                username: None,
+            },
+        )
+        .unwrap();
         save_message(&c, u, &MessageRow { peer_id: 77, ..m(9, "post") }).unwrap();
         assert_eq!(waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap().len(), 1);
         assert_eq!(search_messages(&c, u, "молоко", 10).unwrap().len(), 1);
@@ -655,7 +795,16 @@ mod tests {
     fn edits_update_text_but_are_not_new() {
         let c = db();
         let u = ensure_user(&c, 1).unwrap();
-        let m = |t: &str| MessageRow { peer_id: 5, message_id: 1, sender_id: None, sender_name: None, is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "text".into(), text: Some(t.into()) };
+        let m = |t: &str| MessageRow {
+            peer_id: 5,
+            message_id: 1,
+            sender_id: None,
+            sender_name: None,
+            is_outgoing: false,
+            date: "2026-01-01 10:00:00".into(),
+            kind: "text".into(),
+            text: Some(t.into()),
+        };
         assert!(save_message(&c, u, &m("first")).unwrap());
         assert!(!save_message(&c, u, &m("first")).unwrap());
         assert!(!save_message(&c, u, &m("edited")).unwrap()); // edit: not new ...
@@ -706,10 +855,26 @@ mod tests {
     fn news_dedupe_fallback_and_classification() {
         let c = db();
         let u = ensure_user(&c, 1).unwrap();
-        let ch = |id: i64, name: &str, kind: &str| ContactRow { peer_id: id, peer_kind: kind.into(), is_bot: false, is_archived: false, display_name: name.into(), username: None };
+        let ch = |id: i64, name: &str, kind: &str| ContactRow {
+            peer_id: id,
+            peer_kind: kind.into(),
+            is_bot: false,
+            is_archived: false,
+            display_name: name.into(),
+            username: None,
+        };
         upsert_contact(&c, u, &ch(10, "Tech News", "channel")).unwrap();
         upsert_contact(&c, u, &ch(11, "Family", "chat")).unwrap();
-        let post = |peer: i64, id: i64, date: &str, text: &str| MessageRow { peer_id: peer, message_id: id, sender_id: None, sender_name: None, is_outgoing: false, date: date.into(), kind: "text".into(), text: Some(text.into()) };
+        let post = |peer: i64, id: i64, date: &str, text: &str| MessageRow {
+            peer_id: peer,
+            message_id: id,
+            sender_id: None,
+            sender_name: None,
+            is_outgoing: false,
+            date: date.into(),
+            kind: "text".into(),
+            text: Some(text.into()),
+        };
         save_message(&c, u, &post(10, 1, "2020-01-01 10:00:00", "old rust news")).unwrap();
         save_message(&c, u, &post(10, 2, "2020-01-02 10:00:00", "older ai news")).unwrap();
         save_message(&c, u, &post(11, 1, "2020-01-03 10:00:00", "dinner?")).unwrap();
@@ -734,7 +899,19 @@ mod tests {
         for i in 100..140 {
             save_message(&c, u, &post(10, i, "2099-01-01 10:00:00", &format!("spam {i}"))).unwrap();
         }
-        upsert_contact(&c, u, &ContactRow { peer_id: 12, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Quiet".into(), username: None }).unwrap();
+        upsert_contact(
+            &c,
+            u,
+            &ContactRow {
+                peer_id: 12,
+                peer_kind: "channel".into(),
+                is_bot: false,
+                is_archived: false,
+                display_name: "Quiet".into(),
+                username: None,
+            },
+        )
+        .unwrap();
         update_contact_flags(&c, u, 12, Some(true), None, None).unwrap();
         save_message(&c, u, &post(12, 1, "2099-01-01 09:00:00", "quiet post")).unwrap();
         let fair = news_unsent(&c, u, "2098-01-01 00:00:00", None, 40).unwrap();
@@ -753,7 +930,19 @@ mod tests {
         assert!(news_latest_unsent(&c, u, None, 3).unwrap().is_empty());
 
         // archived chats are invisible and never mirrored while ignore_archived is on (the default)
-        upsert_contact(&c, u, &ContactRow { peer_id: 55, peer_kind: "channel".into(), is_bot: false, is_archived: true, display_name: "Old".into(), username: None }).unwrap();
+        upsert_contact(
+            &c,
+            u,
+            &ContactRow {
+                peer_id: 55,
+                peer_kind: "channel".into(),
+                is_bot: false,
+                is_archived: true,
+                display_name: "Old".into(),
+                username: None,
+            },
+        )
+        .unwrap();
         assert!(!mirror_enabled(&c, u, 55).unwrap());
         assert!(list_contacts_full(&c, u).unwrap().iter().all(|k| k.peer_id != 55));
         assert!(contacts_for_classification(&c, u, 50).unwrap().iter().all(|r| r.0 != 55));
@@ -763,8 +952,32 @@ mod tests {
         set_setting(&c, u, "ignore_archived", 1.into()).unwrap();
 
         // entertainment is filed as not-mirrored by default; other categories stay mirrored
-        upsert_contact(&c, u, &ContactRow { peer_id: 60, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Memes".into(), username: None }).unwrap();
-        upsert_contact(&c, u, &ContactRow { peer_id: 61, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Jobs".into(), username: None }).unwrap();
+        upsert_contact(
+            &c,
+            u,
+            &ContactRow {
+                peer_id: 60,
+                peer_kind: "channel".into(),
+                is_bot: false,
+                is_archived: false,
+                display_name: "Memes".into(),
+                username: None,
+            },
+        )
+        .unwrap();
+        upsert_contact(
+            &c,
+            u,
+            &ContactRow {
+                peer_id: 61,
+                peer_kind: "channel".into(),
+                is_bot: false,
+                is_archived: false,
+                display_name: "Jobs".into(),
+                username: None,
+            },
+        )
+        .unwrap();
         apply_classification(&c, u, &[(60, "entertainment".into(), false), (61, "work".into(), false)]).unwrap();
         assert!(!mirror_enabled(&c, u, 60).unwrap() && mirror_enabled(&c, u, 61).unwrap());
 

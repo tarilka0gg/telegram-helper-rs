@@ -7,7 +7,12 @@ use grammers_client::{client::PasswordToken, Client, SignInError};
 use tgh_core::db::repo;
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use crate::{ctx::Ctx, dbsession::DbSession, login::{self, CodeInfo, SignIn}, userbot};
+use crate::{
+    ctx::Ctx,
+    dbsession::DbSession,
+    login::{self, CodeInfo, SignIn},
+    userbot,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum QrStatus {
@@ -43,7 +48,9 @@ struct Inner {
 
 /// A hung Telegram request must not keep the login lock (and with it every command) forever.
 async fn net<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    tokio::time::timeout(std::time::Duration::from_secs(45), fut).await.map_err(|_| anyhow::anyhow!("Telegram не відповідає (таймаут 45 с)"))?
+    tokio::time::timeout(std::time::Duration::from_secs(45), fut)
+        .await
+        .map_err(|_| anyhow::anyhow!("Telegram не відповідає (таймаут 45 с)"))?
 }
 
 pub enum CodeResult {
@@ -60,7 +67,11 @@ pub struct Manager {
 
 impl Manager {
     pub fn new(ctx: Arc<Ctx>) -> Arc<Self> {
-        Arc::new(Self { ctx, qr: Arc::new(QrShared { url: Default::default(), status: std::sync::Mutex::new(QrStatus::Idle) }), inner: Mutex::new(Inner::default()) })
+        Arc::new(Self {
+            ctx,
+            qr: Arc::new(QrShared { url: Default::default(), status: std::sync::Mutex::new(QrStatus::Idle) }),
+            inner: Mutex::new(Inner::default()),
+        })
     }
 
     /// A usable peer reference (with the access hash Telegram requires) from the session cache.
@@ -210,7 +221,10 @@ impl Manager {
                             }
                             other => {
                                 c.handle.quit();
-                                tracing::warn!("reconnect: session not usable yet ({:?}); retrying in {backoff:?}", other.map(|r| r.is_ok()));
+                                tracing::warn!(
+                                    "reconnect: session not usable yet ({:?}); retrying in {backoff:?}",
+                                    other.map(|r| r.is_ok())
+                                );
                                 tokio::time::sleep(backoff).await;
                                 backoff = (backoff * 2).min(std::time::Duration::from_secs(120));
                                 continue;
@@ -264,13 +278,14 @@ impl Manager {
         }
         let session = DbSession::new();
         let conn = userbot::connect(session.clone(), self.ctx.cfg.api_id);
-        let info = match net(login::send_code(&conn.client, &conn.handle, &session, phone, self.ctx.cfg.api_id, &self.ctx.cfg.api_hash)).await {
-            Ok(i) => i,
-            Err(e) => {
-                conn.handle.quit();
-                return Err(e);
-            }
-        };
+        let info =
+            match net(login::send_code(&conn.client, &conn.handle, &session, phone, self.ctx.cfg.api_id, &self.ctx.cfg.api_hash)).await {
+                Ok(i) => i,
+                Err(e) => {
+                    conn.handle.quit();
+                    return Err(e);
+                }
+            };
         tracing::info!("login code requested, delivery: {}", info.via);
         g.pending = Some(Pending { conn, session, phone: phone.to_string(), info: Some(info.clone()), password: None });
         Ok(info)

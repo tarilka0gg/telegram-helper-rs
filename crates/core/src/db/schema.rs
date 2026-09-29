@@ -307,13 +307,16 @@ mod tests {
         let c = python_original_db();
         migrate(&c).unwrap();
         migrate(&c).unwrap(); // idempotent
-        // data survived, new columns exist with sensible defaults
+                              // data survived, new columns exist with sensible defaults
         assert_eq!(count(&c, "SELECT count(*) FROM messages"), 1);
         assert_eq!(count(&c, "SELECT mirror FROM contacts WHERE peer_id = 10"), 1);
         assert_eq!(count(&c, "SELECT count(*) FROM contacts WHERE category IS NULL"), 1);
         assert_eq!(count(&c, "PRAGMA user_version"), 2);
         // only the Python triggers exist: ours must not be added on top (would double-index)
-        assert_eq!(count(&c, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('messages_ai','messages_ad','messages_au')"), 0);
+        assert_eq!(
+            count(&c, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('messages_ai','messages_ad','messages_au')"),
+            0
+        );
         assert_eq!(count(&c, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'"), 3);
         // a new message through our repo layer is indexed exactly once
         crate::db::repo::ensure_user(&c, 7).unwrap();
@@ -322,7 +325,10 @@ mod tests {
         let hits = crate::db::repo::search_messages(&c, 1, "молоко", 10).unwrap();
         assert_eq!(hits.len(), 2, "each message must be found once, not twice");
         // the microsecond timestamp written by Python still parses
-        assert!(crate::db::repo::parse_ts(&c.query_row::<String, _, _>("SELECT date FROM messages WHERE message_id = 1", [], |r| r.get(0)).unwrap()).is_some());
+        assert!(crate::db::repo::parse_ts(
+            &c.query_row::<String, _, _>("SELECT date FROM messages WHERE message_id = 1", [], |r| r.get(0)).unwrap()
+        )
+        .is_some());
     }
 
     #[test]

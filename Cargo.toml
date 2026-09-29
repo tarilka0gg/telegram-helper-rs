@@ -5,6 +5,9 @@ members = ["crates/native", "crates/core", "crates/tg", "crates/server"]
 [workspace.package]
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/tarilka0gg/telegram-helper-rs"
+rust-version = "1.85"
+publish = false
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

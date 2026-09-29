@@ -10,16 +10,15 @@ use grammers_client::{
     update::{CallbackQuery, Update},
     Client,
 };
-use tgh_core::{
-    db::repo,
-    intent,
-    llm::ChatMessage,
-    sanitize::sanitize_html,
-    AGENT_PROMPT,
-};
+use tgh_core::{db::repo, intent, llm::ChatMessage, sanitize::sanitize_html, AGENT_PROMPT};
 use tokio::sync::Mutex;
 
-use crate::{ctx::Ctx, features, manager::{CodeResult, Manager}, userbot};
+use crate::{
+    ctx::Ctx,
+    features,
+    manager::{CodeResult, Manager},
+    userbot,
+};
 
 /// Inline keyboard as rows of (label, callback data); built into a `ReplyMarkup` per send attempt.
 pub type Kb = Vec<Vec<(String, String)>>;
@@ -32,7 +31,8 @@ pub(crate) fn btn(label: impl Into<String>, data: impl Into<String>) -> (String,
 }
 
 fn to_markup(kb: &Kb) -> ReplyMarkup {
-    let rows: Vec<Vec<Button>> = kb.iter().map(|r| r.iter().map(|(l, d)| Button::data(l.clone(), d.clone().into_bytes())).collect()).collect();
+    let rows: Vec<Vec<Button>> =
+        kb.iter().map(|r| r.iter().map(|(l, d)| Button::data(l.clone(), d.clone().into_bytes())).collect()).collect();
     ReplyMarkup::from_buttons(&rows)
 }
 
@@ -133,7 +133,15 @@ pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
             let _ = ctx.bot_username.set(u.to_string());
         }
     }
-    let bot = Arc::new(Bot { ctx: ctx.clone(), mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default(), owner_ref: Mutex::default() });
+    let bot = Arc::new(Bot {
+        ctx: ctx.clone(),
+        mgr,
+        client: conn.client.clone(),
+        conv: Mutex::default(),
+        memory: Mutex::default(),
+        last_pick: Mutex::default(),
+        owner_ref: Mutex::default(),
+    });
     let mut stream = conn
         .client
         .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, update_queue_limit: Some(10_000) })
@@ -221,7 +229,9 @@ impl Bot {
                     PasswordNeeded(hint) => {
                         *bot.conv.lock().await = Conv::Password;
                         let hint = hint.map(|h| format!(" (підказка: {})", esc(&h))).unwrap_or_default();
-                        let _ = bot.say(peer, &format!("QR прийнято. Потрібен пароль 2FA{hint} — надішли його сюди, повідомлення я видалю.")).await;
+                        let _ = bot
+                            .say(peer, &format!("QR прийнято. Потрібен пароль 2FA{hint} — надішли його сюди, повідомлення я видалю."))
+                            .await;
                         return;
                     }
                     Failed(e) => {
@@ -266,7 +276,13 @@ impl Bot {
     }
 
     async fn load_owner_ref(&self) {
-        let stored = self.ctx.db.call(|c| c.query_row("SELECT detail FROM events WHERE kind = 'owner_ref' ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, String>(0))).await;
+        let stored = self
+            .ctx
+            .db
+            .call(|c| {
+                c.query_row("SELECT detail FROM events WHERE kind = 'owner_ref' ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, String>(0))
+            })
+            .await;
         if let Some(r) = stored.ok().and_then(|j| serde_json::from_str::<PeerRef>(&j).ok()) {
             *self.owner_ref.lock().await = Some(r);
         }
@@ -334,7 +350,11 @@ impl Bot {
                 match self.mgr.begin_login(phone).await {
                     Ok(info) => {
                         *self.conv.lock().await = Conv::Code;
-                        let next = info.next.as_ref().map(|n| format!("\nНе прийшов? /resend — надіслати повторно ({}).", esc(n))).unwrap_or_default();
+                        let next = info
+                            .next
+                            .as_ref()
+                            .map(|n| format!("\nНе прийшов? /resend — надіслати повторно ({}).", esc(n)))
+                            .unwrap_or_default();
                         self.say(peer, &format!("Код надіслано: <b>{}</b>.\nВведи його <b>з пробілами між цифрами</b> (<code>1 2 3 4 5</code>) — інакше Telegram анулює код, побачивши його відкрито.{next}", esc(&info.via))).await
                     }
                     Err(e) => self.say(peer, &format!("Не вдалося запросити код: {}", esc(&e.to_string()))).await,
@@ -344,7 +364,9 @@ impl Bot {
                 let _ = m.delete().await; // do not leave the code in the chat
                 let code: String = text.chars().filter(char::is_ascii_digit).collect();
                 match self.mgr.submit_code(&code).await {
-                    Ok(CodeResult::LoggedIn(name)) => self.say(peer, &format!("✅ Увійшов як <b>{}</b>. Синхронізую чати…", esc(&name))).await,
+                    Ok(CodeResult::LoggedIn(name)) => {
+                        self.say(peer, &format!("✅ Увійшов як <b>{}</b>. Синхронізую чати…", esc(&name))).await
+                    }
                     Ok(CodeResult::PasswordRequired(hint)) => {
                         *self.conv.lock().await = Conv::Password;
                         let hint = hint.map(|h| format!(" (підказка: {})", esc(&h))).unwrap_or_default();
@@ -429,18 +451,29 @@ impl Bot {
         let s = self.ctx.settings().await?;
         let up = self.mgr.is_logged_in().await;
         let uid = self.ctx.user_id;
-        let (msgs, contacts): (i64, i64) = self.ctx.db.call(move |c| Ok((
-            c.query_row("SELECT count(*) FROM messages WHERE user_id = ?", [uid], |r| r.get(0))?,
-            c.query_row("SELECT count(*) FROM contacts WHERE user_id = ?", [uid], |r| r.get(0))?,
-        ))).await?;
+        let (msgs, contacts): (i64, i64) = self
+            .ctx
+            .db
+            .call(move |c| {
+                Ok((
+                    c.query_row("SELECT count(*) FROM messages WHERE user_id = ?", [uid], |r| r.get(0))?,
+                    c.query_row("SELECT count(*) FROM contacts WHERE user_id = ?", [uid], |r| r.get(0))?,
+                ))
+            })
+            .await?;
         let has_key = self.ctx.llm().await?.is_some();
-        self.say(peer, &format!(
-            "Userbot: {}\nLLM: {} ({})\nАвто-відповідь: {}\nПовідомлень у БД: {msgs}, контактів: {contacts}\nВеб-аналітика: http://{}",
-            if up { "🟢 підключено" } else { "🔴 не підключено (/login)" },
-            s.llm_provider, if has_key { "ключ є" } else { "ключа немає — /key" },
-            if s.auto_reply_enabled { "увімкнена" } else { "вимкнена" },
-            self.ctx.cfg.web_addr,
-        )).await
+        self.say(
+            peer,
+            &format!(
+                "Userbot: {}\nLLM: {} ({})\nАвто-відповідь: {}\nПовідомлень у БД: {msgs}, контактів: {contacts}\nВеб-аналітика: http://{}",
+                if up { "🟢 підключено" } else { "🔴 не підключено (/login)" },
+                s.llm_provider,
+                if has_key { "ключ є" } else { "ключа немає — /key" },
+                if s.auto_reply_enabled { "увімкнена" } else { "вимкнена" },
+                self.ctx.cfg.web_addr,
+            ),
+        )
+        .await
     }
 
     async fn set_key(&self, arg: &str, peer: PeerRef, m: &grammers_client::message::Message) -> Result<()> {
@@ -457,28 +490,47 @@ impl Bot {
             return self.say(peer, "Ключ не пройшов перевірку — не зберіг.").await;
         }
         let (uid, enc, name) = (self.ctx.user_id, self.ctx.crypto.encrypt(key), provider.name());
-        self.ctx.db.call(move |c| {
-            repo::set_api_key(c, uid, name, &enc)?;
-            repo::set_setting(c, uid, "llm_provider", name.to_string().into())?;
-            Ok(())
-        }).await?;
+        self.ctx
+            .db
+            .call(move |c| {
+                repo::set_api_key(c, uid, name, &enc)?;
+                repo::set_setting(c, uid, "llm_provider", name.to_string().into())?;
+                Ok(())
+            })
+            .await?;
         self.say(peer, &format!("✅ Ключ {name} збережено (зашифровано), провайдер активний.")).await
     }
 
     async fn show_settings(&self, peer: PeerRef) -> Result<()> {
         let s = self.ctx.settings().await?;
         let onoff = |b: bool| if b { "✅" } else { "⬜" };
-        self.say(peer, &format!(
-            "<b>Налаштування</b> (змінити: <code>/set ключ значення</code> або словами)\n\n\
+        self.say(
+            peer,
+            &format!(
+                "<b>Налаштування</b> (змінити: <code>/set ключ значення</code> або словами)\n\n\
              {} auto_reply_enabled · режим <code>{}</code> · кулдаун {} хв\n<i>{}</i>\n\
              {} digest_enabled · о <code>{}</code>\n{} news_enabled · о <code>{}</code> · вікно {} год\n\
              {} reminders_enabled · за {} год · прострочені {}\n{} ignore_archived\n\
              {} use_heavy_model · провайдер <code>{}</code> · TZ <code>{}</code>",
-            onoff(s.auto_reply_enabled), s.auto_reply_mode, s.auto_reply_cooldown_min, esc(&s.auto_reply_text),
-            onoff(s.digest_enabled), s.digest_time, onoff(s.news_enabled), s.news_digest_time, s.news_window_hours,
-            onoff(s.reminders_enabled), s.reminder_lead_hours, onoff(s.reminder_overdue_enabled), onoff(s.ignore_archived),
-            onoff(s.use_heavy_model), s.llm_provider, s.timezone,
-        )).await
+                onoff(s.auto_reply_enabled),
+                s.auto_reply_mode,
+                s.auto_reply_cooldown_min,
+                esc(&s.auto_reply_text),
+                onoff(s.digest_enabled),
+                s.digest_time,
+                onoff(s.news_enabled),
+                s.news_digest_time,
+                s.news_window_hours,
+                onoff(s.reminders_enabled),
+                s.reminder_lead_hours,
+                onoff(s.reminder_overdue_enabled),
+                onoff(s.ignore_archived),
+                onoff(s.use_heavy_model),
+                s.llm_provider,
+                s.timezone,
+            ),
+        )
+        .await
     }
 
     async fn set_setting(&self, arg: &str, peer: PeerRef) -> Result<()> {
@@ -491,7 +543,9 @@ impl Bot {
 
     /// Shared by `/set` and the agent. Validates key (whitelist) and value before touching the DB.
     pub(crate) async fn apply_setting(&self, key: &str, value: &serde_json::Value) -> Result<String> {
-        let Some(col) = intent::setting_column(key) else { return Ok(format!("Невідоме налаштування <code>{}</code>.", esc(key))) };
+        let Some(col) = intent::setting_column(key) else {
+            return Ok(format!("Невідоме налаштування <code>{}</code>.", esc(key)));
+        };
         let value = &coerce_bool(col, value);
         if let Err(why) = validate_setting(col, value) {
             return Ok(format!("Недопустиме значення для <code>{col}</code>: {why}"));
@@ -515,9 +569,17 @@ impl Bot {
             let uid = self.ctx.user_id;
             self.ctx.db.call(move |c| repo::list_contacts(c, uid)).await?.into_iter().map(|k| (k.peer_id, k.display_name)).collect()
         };
-        let lines: Vec<String> = hits.iter().map(|h| format!(
-            "• <b>{}</b> · {}\n{}", esc(names.get(&h.peer_id).map_or("?", |s| s)), &h.date[..h.date.len().min(16)],
-            esc(&h.text.clone().unwrap_or_default().chars().take(200).collect::<String>()))).collect();
+        let lines: Vec<String> = hits
+            .iter()
+            .map(|h| {
+                format!(
+                    "• <b>{}</b> · {}\n{}",
+                    esc(names.get(&h.peer_id).map_or("?", |s| s)),
+                    &h.date[..h.date.len().min(16)],
+                    esc(&h.text.clone().unwrap_or_default().chars().take(200).collect::<String>())
+                )
+            })
+            .collect();
         self.say(peer, &lines.join("\n\n")).await
     }
 
@@ -529,7 +591,13 @@ impl Bot {
         }
         for it in items.iter().take(15) {
             let who = if it.direction == "mine" { "я → " } else { "" };
-            let text = format!("{}<b>{}</b>: {}\n<i>{}</i>", who, esc(&it.peer_name), esc(&it.text), it.deadline_at.as_deref().map_or("без строку".into(), |d| format!("до {d} UTC")));
+            let text = format!(
+                "{}<b>{}</b>: {}\n<i>{}</i>",
+                who,
+                esc(&it.peer_name),
+                esc(&it.text),
+                it.deadline_at.as_deref().map_or("без строку".into(), |d| format!("до {d} UTC"))
+            );
             let kb = vec![vec![btn("✅ Готово", format!("done:{}", it.id)), btn("✖ Скасувати", format!("cancel:{}", it.id))]];
             self.say_with(peer, &text, Some(kb)).await?;
         }
@@ -545,9 +613,12 @@ impl Bot {
         match found.as_slice() {
             [] => self.say(peer, "Не знайшов такого контакту. Спробуй /sync.").await,
             [(k, _)] => self.run_chat_action(action, k.peer_id, &k.display_name, peer).await,
-            many if many[0].1 >= 90 && many[1].1 + 10 <= many[0].1 => self.run_chat_action(action, many[0].0.peer_id, &many[0].0.display_name, peer).await,
+            many if many[0].1 >= 90 && many[1].1 + 10 <= many[0].1 => {
+                self.run_chat_action(action, many[0].0.peer_id, &many[0].0.display_name, peer).await
+            }
             many => {
-                let mut rows: Kb = many.iter().map(|(k, _)| vec![btn(k.display_name.clone(), format!("c:{action}:{}", k.peer_id))]).collect();
+                let mut rows: Kb =
+                    many.iter().map(|(k, _)| vec![btn(k.display_name.clone(), format!("c:{action}:{}", k.peer_id))]).collect();
                 if action != "menu" {
                     let cands: Vec<(i64, String)> = many.iter().map(|(k, _)| (k.peer_id, k.display_name.clone())).collect();
                     let payload = serde_json::json!({"action": action, "peers": cands}).to_string();
@@ -589,7 +660,9 @@ impl Bot {
             }
             ["pa", id] => {
                 let id = id.parse::<i64>().unwrap_or(0);
-                let Some((_, raw)) = self.ctx.db.call(move |c| repo::pending_take(c, uid, id)).await? else { return self.say(peer, "Ця дія вже виконана.").await };
+                let Some((_, raw)) = self.ctx.db.call(move |c| repo::pending_take(c, uid, id)).await? else {
+                    return self.say(peer, "Ця дія вже виконана.").await;
+                };
                 let v: serde_json::Value = serde_json::from_str(&raw)?;
                 let action = v["action"].as_str().unwrap_or("summary").to_string();
                 let peers: Vec<(i64, String)> = serde_json::from_value(v["peers"].clone()).unwrap_or_default();
@@ -615,7 +688,14 @@ impl Bot {
 
     pub(crate) async fn contact_name(&self, peer_id: i64) -> Result<String> {
         let uid = self.ctx.user_id;
-        Ok(self.ctx.db.call(move |c| repo::list_contacts(c, uid)).await?.into_iter().find(|k| k.peer_id == peer_id).map_or_else(|| peer_id.to_string(), |k| k.display_name))
+        Ok(self
+            .ctx
+            .db
+            .call(move |c| repo::list_contacts(c, uid))
+            .await?
+            .into_iter()
+            .find(|k| k.peer_id == peer_id)
+            .map_or_else(|| peer_id.to_string(), |k| k.display_name))
     }
 
     pub(crate) async fn free_text_public(&self, text: &str, peer: PeerRef) -> Result<()> {
@@ -650,7 +730,10 @@ impl Bot {
             let mem = self.memory.lock().await;
             if !mem.is_empty() {
                 let block: Vec<String> = mem.iter().map(|(u, a)| format!("Владелец: {u}\nБот: {a}")).collect();
-                system.push_str(&format!("\n\nКраткая память недавнего диалога (для отсылок «ему», «в том же чате»):\n{}", block.join("\n---\n")));
+                system.push_str(&format!(
+                    "\n\nКраткая память недавнего диалога (для отсылок «ему», «в том же чате»):\n{}",
+                    block.join("\n---\n")
+                ));
             }
         }
         let raw = match llm.chat("agent", &[ChatMessage::system(system), ChatMessage::user(text)], s.use_heavy_model).await {
@@ -678,7 +761,26 @@ impl Bot {
 pub(crate) fn is_all_answer(text: &str) -> bool {
     let t: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
     let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
-    matches!(t.as_str(), "усі" | "всі" | "все" | "обидва" | "обидві" | "обоє" | "і те і те" | "і той і той" | "и то и то" | "оба" | "обе" | "всё" | "both" | "all" | "all of them" | "кожен" | "кожний")
+    matches!(
+        t.as_str(),
+        "усі"
+            | "всі"
+            | "все"
+            | "обидва"
+            | "обидві"
+            | "обоє"
+            | "і те і те"
+            | "і той і той"
+            | "и то и то"
+            | "оба"
+            | "обе"
+            | "всё"
+            | "both"
+            | "all"
+            | "all of them"
+            | "кожен"
+            | "кожний"
+    )
 }
 
 /// Plain-text version of (possibly broken) HTML, for the fallback when Telegram rejects the markup.
@@ -698,7 +800,15 @@ pub(crate) fn strip_html(html: &str) -> String {
 
 /// `/set flag 1` and models answering `1`/`0` for a boolean setting are accepted as true/false.
 fn coerce_bool(col: &str, v: &serde_json::Value) -> serde_json::Value {
-    const BOOLS: &[&str] = &["auto_reply_enabled", "digest_enabled", "news_enabled", "reminders_enabled", "reminder_overdue_enabled", "ignore_archived", "use_heavy_model"];
+    const BOOLS: &[&str] = &[
+        "auto_reply_enabled",
+        "digest_enabled",
+        "news_enabled",
+        "reminders_enabled",
+        "reminder_overdue_enabled",
+        "ignore_archived",
+        "use_heavy_model",
+    ];
     match (BOOLS.contains(&col), v.as_i64()) {
         (true, Some(0)) => serde_json::Value::Bool(false),
         (true, Some(1)) => serde_json::Value::Bool(true),
@@ -725,10 +835,30 @@ fn parse_scalar(s: &str) -> serde_json::Value {
 /// Type/range check per setting so a confused LLM cannot store garbage (e.g. digest_time = "morning").
 pub(crate) fn validate_setting(col: &str, v: &serde_json::Value) -> std::result::Result<(), &'static str> {
     use serde_json::Value::*;
-    let hhmm = |s: &str| s.len() == 5 && s.as_bytes()[2] == b':' && s[..2].parse::<u8>().is_ok_and(|h| h < 24) && s[3..].parse::<u8>().is_ok_and(|m| m < 60);
+    let hhmm = |s: &str| {
+        s.len() == 5 && s.as_bytes()[2] == b':' && s[..2].parse::<u8>().is_ok_and(|h| h < 24) && s[3..].parse::<u8>().is_ok_and(|m| m < 60)
+    };
     match (col, v) {
-        ("auto_reply_enabled" | "digest_enabled" | "news_enabled" | "reminders_enabled" | "reminder_overdue_enabled" | "ignore_archived" | "use_heavy_model", Bool(_)) => Ok(()),
-        ("auto_reply_enabled" | "digest_enabled" | "news_enabled" | "reminders_enabled" | "reminder_overdue_enabled" | "ignore_archived" | "use_heavy_model", _) => Err("потрібно true/false"),
+        (
+            "auto_reply_enabled"
+            | "digest_enabled"
+            | "news_enabled"
+            | "reminders_enabled"
+            | "reminder_overdue_enabled"
+            | "ignore_archived"
+            | "use_heavy_model",
+            Bool(_),
+        ) => Ok(()),
+        (
+            "auto_reply_enabled"
+            | "digest_enabled"
+            | "news_enabled"
+            | "reminders_enabled"
+            | "reminder_overdue_enabled"
+            | "ignore_archived"
+            | "use_heavy_model",
+            _,
+        ) => Err("потрібно true/false"),
         ("auto_reply_mode", String(s)) if s == "static" || s == "smart" => Ok(()),
         ("auto_reply_mode", _) => Err("static або smart"),
         ("llm_provider", String(s)) if tgh_core::llm::Provider::parse(s).is_some() => Ok(()),
@@ -737,7 +867,11 @@ pub(crate) fn validate_setting(col: &str, v: &serde_json::Value) -> std::result:
         ("digest_time" | "news_digest_time", _) => Err("формат HH:MM"),
         ("timezone", String(s)) if s.parse::<chrono_tz::Tz>().is_ok() => Ok(()),
         ("timezone", _) => Err("потрібна IANA-зона, напр. Europe/Kyiv"),
-        ("auto_reply_cooldown_min" | "news_window_hours" | "reminder_lead_hours", Number(n)) if n.as_i64().is_some_and(|x| (1..=10_000).contains(&x)) => Ok(()),
+        ("auto_reply_cooldown_min" | "news_window_hours" | "reminder_lead_hours", Number(n))
+            if n.as_i64().is_some_and(|x| (1..=10_000).contains(&x)) =>
+        {
+            Ok(())
+        }
         ("auto_reply_cooldown_min" | "news_window_hours" | "reminder_lead_hours", _) => Err("ціле число ≥ 1"),
         ("auto_reply_text", String(s)) if !s.trim().is_empty() && s.chars().count() <= 500 => Ok(()),
         ("auto_reply_text", _) => Err("непорожній текст до 500 символів"),
@@ -853,7 +987,12 @@ mod tests {
 
     #[test]
     fn flood_wait_is_parsed_from_error_text() {
-        assert_eq!(flood_wait_secs("bot sign-in failed: request error: rpc error 420: FLOOD_WAIT caused by auth.importBotAuthorization (value: 1361)"), Some(1361));
+        assert_eq!(
+            flood_wait_secs(
+                "bot sign-in failed: request error: rpc error 420: FLOOD_WAIT caused by auth.importBotAuthorization (value: 1361)"
+            ),
+            Some(1361)
+        );
         assert_eq!(flood_wait_secs("FLOOD_WAIT (value: 7) trailing"), Some(7));
         assert_eq!(flood_wait_secs("FLOOD_WAIT without number"), None);
         assert_eq!(flood_wait_secs("value: 5 but no flood"), None);
