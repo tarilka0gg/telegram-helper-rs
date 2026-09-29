@@ -107,9 +107,19 @@ pub async fn run(mgr: &Arc<Manager>) -> Vec<Check> {
         Ok(format!("fetched {} message(s) from '{name}' straight from Telegram", msgs.len()))
     }).await);
 
-    // End to end: the owner's account messages the owner's bot; the bot must answer.
-    for (cmd, expect) in [("/status", "Userbot:"), ("/help", "TelegramHelper"), ("/settings", "Налаштування")] {
-        out.push(check(match cmd { "/status" => "bot e2e: /status", "/help" => "bot e2e: /help", _ => "bot e2e: /settings" }, async {
+    // End to end: the owner's account messages the owner's bot; the bot must answer. Read-only commands only
+    // (no /send, no /news: those have side effects for other people or mark posts as delivered).
+    let scenarios: [(&'static str, &str, &str); 6] = [
+        ("bot e2e: /status", "/status", "Userbot:"),
+        ("bot e2e: /help", "/help", "TelegramHelper"),
+        ("bot e2e: /settings", "/settings", "Налаштування"),
+        ("bot e2e: /topics", "/topics", "новин"),
+        // the needle is echoed back if a previous run left it in the DB (the mirror stores our own probe), else "nothing found"
+        ("bot e2e: /search", "/search selftest-needle-xyz", "needle|Нічого не знайшов"),
+        ("bot e2e: free text -> agent -> LLM", "Відповідай одним коротким реченням: скільки буде 2+2? Це тест.", "4"),
+    ];
+    for (name, cmd, expect) in scenarios {
+        out.push(check(name, async {
             let Some(c) = &client else { bail!("userbot is not logged in") };
             let Some(bot) = ctx.bot_username.get() else { bail!("bot username unknown") };
             let peer = c.resolve_username(bot).await.map_err(|e| anyhow::anyhow!("resolve @{bot}: {e}"))?.ok_or_else(|| anyhow::anyhow!("@{bot} not found"))?;
@@ -117,29 +127,35 @@ pub async fn run(mgr: &Arc<Manager>) -> Vec<Check> {
             let since = repo::fmt_ts(chrono::Utc::now() - chrono::Duration::seconds(2));
             c.send_message(userbot::peer_ref(&peer).await?, grammers_client::message::InputMessage::new().text(cmd)).await.map_err(|e| anyhow::anyhow!("send: {e}"))?;
             let uid = ctx.user_id;
-            for _ in 0..20 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(if cmd.starts_with('/') { 15 } else { 45 });
+            while std::time::Instant::now() < deadline {
                 tokio::time::sleep(Duration::from_millis(750)).await;
                 let s = since.clone();
                 let hit: Option<String> = ctx
                     .db
                     .call(move |cn| {
                         cn.query_row(
-                            "SELECT text FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND is_outgoing = 0 AND date >= ?3 ORDER BY id DESC LIMIT 1",
+                            "SELECT group_concat(text, ' ') FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND is_outgoing = 0 AND date >= ?3",
                             rusqlite::params![uid, bot_id, s],
                             |r| r.get(0),
                         )
-                        .map(Some)
-                        .or_else(|e| if matches!(e, rusqlite::Error::QueryReturnedNoRows) { Ok(None) } else { Err(e) })
                     })
                     .await?;
                 if let Some(text) = hit {
-                    if text.contains(expect) {
+                    if expect.split('|').any(|e| text.contains(e)) {
                         return Ok(format!("bot replied ({} chars)", text.chars().count()));
                     }
                 }
             }
-            bail!("no reply containing {expect:?} within 15 s (is mirror enabled for the bot chat?)")
+            bail!("no reply containing {expect:?} in time (is mirror enabled for the bot chat?)")
         }).await);
     }
+
+    out.push(check("news digest build (not sent, not marked)", async {
+        match crate::news::build(&ctx, mgr, None).await? {
+            crate::news::News::Digest(p) => Ok(format!("digest built from {} post(s), {} chars", p.posts.len(), p.html.chars().count())),
+            crate::news::News::Nothing(why) => Ok(format!("nothing to send: {why}")),
+        }
+    }).await);
     out
 }

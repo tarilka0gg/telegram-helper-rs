@@ -90,7 +90,7 @@ fn message_row(m: &Message, peer_id: i64) -> MessageRow {
 pub async fn run_updates(ctx: Arc<Ctx>, conn: Connected) -> Result<()> {
     let Connected { client, handle, updates, pool_task } = conn;
     let mut stream = client
-        .stream_updates(updates, UpdatesConfiguration { catch_up: true, update_queue_limit: Some(50_000), ..Default::default() })
+        .stream_updates(updates, UpdatesConfiguration { catch_up: true, update_queue_limit: Some(50_000) })
         .await
         .map_err(|e| anyhow::anyhow!("stream_updates: {e}"))?;
     ctx.status.userbot_connected.store(true, Ordering::Relaxed);
@@ -250,7 +250,12 @@ async fn smart_reply(ctx: &Arc<Ctx>, s: &repo::Settings, peer_id: i64, name: &st
         .join("\n");
     let prompt = format!("Собеседник: {name}.\nКонтекст последних сообщений:\n{history}\n\nПоследнее входящее: {incoming}\n\nСформируй ответ от моего имени.");
     let out = llm.chat("auto_reply", &[ChatMessage::system(AUTO_REPLY_SYSTEM), ChatMessage::user(prompt)], s.use_heavy_model).await?;
-    Ok(Some(out.trim().to_string()))
+    // Whatever the counterpart typed went into the prompt: cap what we are willing to send in the owner's name.
+    let mut reply: String = out.trim().chars().take(600).collect();
+    if out.trim().chars().count() > 600 {
+        reply.push('…');
+    }
+    Ok(Some(reply))
 }
 
 /// Refreshes contacts from the dialog list (with archive flags). Returns how many were stored.

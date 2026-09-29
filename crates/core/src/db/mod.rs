@@ -64,4 +64,40 @@ mod tests {
         let n: i64 = db.call(|c| c.query_row("SELECT 41 + 1", [], |r| r.get(0))).await.unwrap();
         assert_eq!(n, 42);
     }
+
+    /// Many concurrent writers and readers through the single shared connection: nothing lost, nothing deadlocked.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_and_readers() {
+        let db = Db::open_in_memory().unwrap();
+        db.call(|c| repo::ensure_user(c, 1)).await.unwrap();
+        let mut tasks = Vec::new();
+        for w in 0..8i64 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                for i in 0..250i64 {
+                    db.call(move |c| {
+                        repo::save_message(c, 1, &repo::MessageRow { peer_id: w, message_id: i, sender_id: None, sender_name: None, is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "text".into(), text: Some(format!("m{w}-{i}")) })
+                    })
+                    .await
+                    .unwrap();
+                }
+            }));
+        }
+        for _ in 0..4 {
+            let db = db.clone();
+            tasks.push(tokio::spawn(async move {
+                for _ in 0..100 {
+                    db.call(|c| analytics::overview(c, true)).await.unwrap();
+                    db.call(|c| repo::search_messages(c, 1, "m3", 5)).await.unwrap();
+                }
+            }));
+        }
+        for t in tasks {
+            tokio::time::timeout(std::time::Duration::from_secs(60), t).await.expect("deadlock").unwrap();
+        }
+        let n: i64 = db.call(|c| c.query_row("SELECT count(*) FROM messages", [], |r| r.get(0))).await.unwrap();
+        assert_eq!(n, 2000);
+        let fts: i64 = db.call(|c| c.query_row("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'm3'", [], |r| r.get(0))).await.unwrap();
+        assert!(fts >= 250);
+    }
 }

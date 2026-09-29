@@ -49,4 +49,31 @@ mod tests {
         let t = c.encrypt("hello");
         assert_eq!(c.decrypt(&t).unwrap(), "hello");
     }
+
+    #[test]
+    fn tampered_truncated_and_garbage_tokens_fail_cleanly() {
+        let c = Crypto::new(&Fernet::generate_key()).unwrap();
+        let token = c.encrypt("secret value");
+        // flip one character at every position: must always be an error (never a panic, never plaintext)
+        for i in 0..token.len() {
+            let mut b = token.clone().into_bytes();
+            b[i] = if b[i] == b'A' { b'B' } else { b'A' };
+            if let Ok(t) = String::from_utf8(b) {
+                if t != token {
+                    assert!(c.decrypt(&t).is_err(), "flip at {i} decrypted");
+                }
+            }
+        }
+        for junk in ["", " ", "\0", "not base64 !!!", &token[..token.len() / 2], &"A".repeat(10_000), "🙂🙂🙂"] {
+            assert!(c.decrypt(junk).is_err(), "{junk:?}");
+        }
+        // an empty / unicode / very large plaintext still round-trips
+        for p in ["", "🙂 юнікод", &"x".repeat(1 << 20)] {
+            assert_eq!(c.decrypt(&c.encrypt(p)).unwrap(), p);
+        }
+        // key with surrounding whitespace/newline (as read from a .env) is accepted
+        let k = Fernet::generate_key();
+        assert!(Crypto::new(&format!("  {k}\n")).is_ok());
+        assert!(Crypto::new("").is_err() && Crypto::new("!!!").is_err());
+    }
 }

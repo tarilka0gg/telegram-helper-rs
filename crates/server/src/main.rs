@@ -61,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let flush_mgr = mgr.clone();
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let result = tokio::select! {
-        r = bot::run(ctx, mgr) => r,
+        r = bot::run_forever(ctx, mgr) => r,
         r = web => r?,
         _ = sigterm.recv() => {
             tracing::info!("SIGTERM: shutting down");

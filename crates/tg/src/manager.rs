@@ -41,6 +41,11 @@ struct Inner {
     pending: Option<Pending>,
 }
 
+/// A hung Telegram request must not keep the login lock (and with it every command) forever.
+async fn net<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(45), fut).await.map_err(|_| anyhow::anyhow!("Telegram не відповідає (таймаут 45 с)"))?
+}
+
 pub enum CodeResult {
     LoggedIn(String),
     PasswordRequired(Option<String>),
@@ -116,7 +121,7 @@ impl Manager {
                 if this.inner.lock().await.pending.is_none() {
                     return; // cancelled
                 }
-                match login::qr_poll(&client, &session, this.ctx.cfg.api_id, &this.ctx.cfg.api_hash).await {
+                match net(login::qr_poll(&client, &session, this.ctx.cfg.api_id, &this.ctx.cfg.api_hash)).await {
                     Ok(login::QrPoll::Waiting(url)) => this.set_qr(QrStatus::Waiting, Some(Some(url))),
                     Ok(login::QrPoll::Done(user)) => {
                         let label = user.full_name();
@@ -184,12 +189,44 @@ impl Manager {
         let client = conn.client.clone();
         let ctx = self.ctx.clone();
         let this = self.clone();
+        let sess = session.clone();
         let task = tokio::spawn(async move {
             if let Err(e) = userbot::sync_dialogs(&ctx, &conn.client).await {
                 tracing::warn!("initial dialog sync failed: {e:#}");
             }
-            if let Err(e) = userbot::run_updates(ctx, conn).await {
-                tracing::error!("userbot stopped: {e:#}");
+            // Supervisor: a dropped connection or a failed update stream must not silence the userbot
+            // until the next manual restart. Reconnect with exponential backoff (2 s .. 2 min).
+            let mut conn = Some(conn);
+            let mut backoff = std::time::Duration::from_secs(2);
+            loop {
+                let c = match conn.take() {
+                    Some(c) => c,
+                    None => {
+                        let c = userbot::connect(sess.clone(), ctx.cfg.api_id);
+                        match tokio::time::timeout(std::time::Duration::from_secs(30), c.client.is_authorized()).await {
+                            Ok(Ok(true)) => {
+                                this.inner.lock().await.client = Some(c.client.clone());
+                                c
+                            }
+                            other => {
+                                c.handle.quit();
+                                tracing::warn!("reconnect: session not usable yet ({:?}); retrying in {backoff:?}", other.map(|r| r.is_ok()));
+                                tokio::time::sleep(backoff).await;
+                                backoff = (backoff * 2).min(std::time::Duration::from_secs(120));
+                                continue;
+                            }
+                        }
+                    }
+                };
+                match userbot::run_updates(ctx.clone(), c).await {
+                    Ok(()) => break, // orderly shutdown (Ctrl+C)
+                    Err(e) => {
+                        tracing::error!("userbot stopped: {e:#}; reconnecting in {backoff:?}");
+                        ctx.event("userbot_reconnect", None, Some(e.to_string().chars().take(200).collect())).await;
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(120));
+                    }
+                }
             }
             this.inner.lock().await.client = None;
         });
@@ -227,7 +264,7 @@ impl Manager {
         }
         let session = DbSession::new();
         let conn = userbot::connect(session.clone(), self.ctx.cfg.api_id);
-        let info = match login::send_code(&conn.client, &conn.handle, &session, phone, self.ctx.cfg.api_id, &self.ctx.cfg.api_hash).await {
+        let info = match net(login::send_code(&conn.client, &conn.handle, &session, phone, self.ctx.cfg.api_id, &self.ctx.cfg.api_hash)).await {
             Ok(i) => i,
             Err(e) => {
                 conn.handle.quit();
@@ -243,7 +280,7 @@ impl Manager {
         let mut g = self.inner.lock().await;
         let Some(p) = g.pending.as_mut() else { bail!("no login in progress; send /login first") };
         let Some(info) = p.info.as_ref() else { bail!("nothing to resend") };
-        let new = login::resend_code(&p.conn.client, info).await?;
+        let new = net(login::resend_code(&p.conn.client, info)).await?;
         tracing::info!("login code resent, delivery: {}", new.via);
         p.info = Some(new.clone());
         Ok(new)
@@ -253,7 +290,7 @@ impl Manager {
         let mut g = self.inner.lock().await;
         let Some(p) = g.pending.as_mut() else { bail!("no login in progress; send /login first") };
         let Some(info) = p.info.clone() else { bail!("code was already used") };
-        match login::sign_in(&p.conn.client, &p.session, &info, code).await? {
+        match net(login::sign_in(&p.conn.client, &p.session, &info, code)).await? {
             SignIn::Done(user) => {
                 let label = user.full_name();
                 drop(g);

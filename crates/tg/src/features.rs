@@ -241,4 +241,49 @@ mod tests {
         let m = MessageRow { peer_id: 1, message_id: 1, sender_id: None, sender_name: Some("Оля".into()), is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "photo".into(), text: None };
         assert_eq!(message_to_text(&m), "[2026-01-01 10:00] Оля: [photo]");
     }
+
+    #[test]
+    fn deadlines_in_many_shapes() {
+        assert_eq!(parse_deadline("2026-05-10T15:00:00Z").as_deref(), Some("2026-05-10 15:00:00"));
+        assert_eq!(parse_deadline("2026-05-10T18:00:00+03:00").as_deref(), Some("2026-05-10 15:00:00")); // offset -> UTC
+        assert_eq!(parse_deadline("2026-05-10T15:00:00").as_deref(), Some("2026-05-10 15:00:00")); // naive = UTC
+        assert_eq!(parse_deadline("  2026-05-10T15:00:00Z \n").as_deref(), Some("2026-05-10 15:00:00"));
+        assert_eq!(parse_deadline("2026-05-10T15:00:00.123Z").as_deref(), Some("2026-05-10 15:00:00"));
+        for bad in ["", "завтра", "2026-13-40T99:99:99Z", "0000-00-00", "2026-05-10", "null", "1e999", &"9".repeat(1000)] {
+            assert_eq!(parse_deadline(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn commitments_parser_survives_garbage() {
+        for junk in ["", "[", "{}", "null", "[null]", "[1,2]", "[{}]", "[{\"direction\":1}]", "[{\"direction\":\"mine\",\"text\":null}]", "```json\n[\n```", &"[".repeat(10_000)] {
+            let _ = parse_commitments(junk);
+        }
+        let v = parse_commitments("[{\"direction\":\"mine\",\"text\":\"  a\\tb  \",\"deadline\":null,\"message_id\":\"x\"}]");
+        assert_eq!(v, vec![("mine".to_string(), "a\tb".to_string(), None)]);
+    }
+
+    #[test]
+    fn contact_ranking_is_total_and_stable_for_odd_names() {
+        let names = ["", " ", "🙂", "Оля", "Оля", "Ольга Іванова", "ОЛЯ", "o", "A".repeat(500).leak() as &str, "\u{0}", "İİİ"];
+        let cs: Vec<ContactRow> = names.iter().enumerate().map(|(i, n)| ContactRow { peer_id: i as i64, peer_kind: "user".into(), is_bot: i == 9, is_archived: false, display_name: (*n).into(), username: if i % 2 == 0 { Some((*n).into()) } else { None } }).collect();
+        for q in ["", "оля", "@", "@оля", "🙂", "İ", &"я".repeat(1000), "\u{0}"] {
+            let r = rank_contacts(&cs, q);
+            assert!(r.len() <= 5);
+            assert!(r.windows(2).all(|w| w[0].1 >= w[1].1), "not sorted for {q:?}");
+            assert!(r.iter().all(|(c, s)| *s >= 60 && !c.is_bot));
+        }
+        assert_eq!(rank_contacts(&cs, "Оля")[0].1, 100);
+        // duplicates keep a deterministic order (same score -> by name)
+        let r = rank_contacts(&cs, "Оля");
+        assert!(r.iter().filter(|(c, _)| c.display_name == "Оля").count() == 2);
+    }
+
+    #[test]
+    fn transcript_handles_multibyte_dates_and_missing_bodies() {
+        let mut m = MessageRow { peer_id: 1, message_id: 1, sender_id: None, sender_name: None, is_outgoing: true, date: "2026".into(), kind: "photo".into(), text: None };
+        assert_eq!(message_to_text(&m), "[2026] Я: [photo]"); // short date must not panic on slicing
+        m.date = "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂".into();
+        let _ = message_to_text(&m); // 16-byte cut inside an emoji must not panic
+    }
 }

@@ -58,30 +58,98 @@ pub struct Bot {
     pub owner_ref: Mutex<Option<PeerRef>>,
 }
 
-pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
-    let conn = userbot::connect(Arc::new(grammers_session::storages::MemorySession::default()), ctx.cfg.api_id);
-    if !conn.client.is_authorized().await.map_err(|e| anyhow::anyhow!("{e}"))? {
-        conn.client.bot_sign_in(&ctx.cfg.bot_token, &ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("bot sign-in failed: {e}"))?;
+/// Seconds Telegram asks us to wait, parsed from an error text like "FLOOD_WAIT ... (value: 1361)".
+pub(crate) fn flood_wait_secs(msg: &str) -> Option<u64> {
+    if !msg.contains("FLOOD_WAIT") {
+        return None;
     }
+    let tail = msg.split("value:").nth(1)?;
+    tail.trim_start().chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+}
+
+/// Runs the control bot forever: a failed login (flood wait, network, revoked token) is logged and retried
+/// instead of taking the whole server (web UI, userbot) down with it.
+pub async fn run_forever(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
+    let mut backoff = std::time::Duration::from_secs(5);
+    loop {
+        match run(ctx.clone(), mgr.clone()).await {
+            Ok(()) => return Ok(()), // orderly shutdown
+            Err(e) => {
+                let msg = format!("{e:#}");
+                let wait = match flood_wait_secs(&msg) {
+                    Some(s) => std::time::Duration::from_secs(s + 5),
+                    None => {
+                        let w = backoff;
+                        backoff = (backoff * 2).min(std::time::Duration::from_secs(300));
+                        w
+                    }
+                };
+                tracing::error!("control bot stopped: {}; retrying in {}s", msg.chars().take(200).collect::<String>(), wait.as_secs());
+                ctx.event("bot_error", None, Some(msg.chars().take(200).collect())).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = tokio::signal::ctrl_c() => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+/// The bot's MTProto session is kept (encrypted) in the DB like the userbot's: signing a bot in again on
+/// every start is rate-limited by Telegram (FLOOD_WAIT on `auth.importBotAuthorization`).
+const BOT_SESSION_KEY: &str = "botsession";
+
+pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
+    let uid = ctx.user_id;
+    let stored = ctx.db.call(move |c| repo::get_api_key(c, uid, BOT_SESSION_KEY)).await?;
+    let mut session = stored
+        .and_then(|enc| ctx.crypto.decrypt(&enc).ok())
+        .and_then(|json| crate::dbsession::DbSession::from_json(&json).ok())
+        .unwrap_or_else(crate::dbsession::DbSession::new);
+    let mut conn = userbot::connect(session.clone(), ctx.cfg.api_id);
+    let authorized = matches!(tokio::time::timeout(std::time::Duration::from_secs(30), conn.client.is_authorized()).await, Ok(Ok(true)));
+    if !authorized {
+        // A stale or foreign session (token replaced, revoked) is dropped: start from a clean one.
+        conn.handle.quit();
+        session = crate::dbsession::DbSession::new();
+        conn = userbot::connect(session.clone(), ctx.cfg.api_id);
+        conn.client.bot_sign_in(&ctx.cfg.bot_token, &ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("bot sign-in failed: {e}"))?;
+        ctx.event("bot_signed_in", None, None).await;
+    }
+    save_bot_session(&ctx, &session).await;
+    let persister = {
+        let (ctx, session) = (ctx.clone(), session.clone());
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                if session.take_dirty() {
+                    save_bot_session(&ctx, &session).await;
+                }
+            }
+        })
+    };
     if let Ok(me) = conn.client.get_me().await {
         if let Some(u) = me.username() {
             let _ = ctx.bot_username.set(u.to_string());
         }
     }
-    let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default(), owner_ref: Mutex::default() });
+    let bot = Arc::new(Bot { ctx: ctx.clone(), mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default(), owner_ref: Mutex::default() });
     let mut stream = conn
         .client
-        .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, update_queue_limit: Some(10_000), ..Default::default() })
+        .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, update_queue_limit: Some(10_000) })
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     bot.load_owner_ref().await;
     crate::scheduler::spawn_all(bot.clone());
     tracing::info!("control bot: listening");
-    loop {
+    let result = loop {
         tokio::select! {
-            _ = tokio::signal::ctrl_c() => break,
+            _ = tokio::signal::ctrl_c() => break Ok(()),
             upd = stream.next() => {
-                let upd = upd.map_err(|e| anyhow::anyhow!("bot update stream: {e}"))?;
+                let upd = match upd {
+                    Ok(u) => u,
+                    Err(e) => break Err(anyhow::anyhow!("bot update stream: {e}")),
+                };
                 let bot = bot.clone();
                 tokio::spawn(async move {
                     let r = match upd {
@@ -95,31 +163,44 @@ pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
                 });
             }
         }
-    }
+    };
+    persister.abort();
     let _ = stream.sync_update_state().await;
+    save_bot_session(&ctx, &session).await;
     conn.handle.quit();
-    Ok(())
+    result
+}
+
+async fn save_bot_session(ctx: &Arc<Ctx>, session: &crate::dbsession::DbSession) {
+    let (uid, blob) = (ctx.user_id, ctx.crypto.encrypt(&session.to_json()));
+    if let Err(e) = ctx.db.call(move |c| repo::set_api_key(c, uid, BOT_SESSION_KEY, &blob)).await {
+        tracing::warn!("cannot persist bot session: {e:#}");
+    }
 }
 
 pub(crate) fn split_message(text: &str, max: usize) -> Vec<String> {
+    // Telegram rejects blank messages (MESSAGE_EMPTY), so whitespace-only pieces are never emitted.
+    fn push(out: &mut Vec<String>, piece: String) {
+        if !piece.trim().is_empty() {
+            out.push(piece);
+        }
+    }
     let mut out = Vec::new();
     let mut cur = String::new();
     for line in text.split_inclusive('\n') {
         if cur.chars().count() + line.chars().count() > max && !cur.is_empty() {
-            out.push(std::mem::take(&mut cur));
+            push(&mut out, std::mem::take(&mut cur));
         }
         // A single line longer than `max`: hard-split by characters.
         let mut line = line;
         while line.chars().count() > max {
             let cut = line.char_indices().nth(max).map_or(line.len(), |(i, _)| i);
-            out.push(line[..cut].to_string());
+            push(&mut out, line[..cut].to_string());
             line = &line[cut..];
         }
         cur.push_str(line);
     }
-    if !cur.trim().is_empty() {
-        out.push(cur);
-    }
+    push(&mut out, cur);
     out
 }
 
@@ -158,7 +239,10 @@ impl Bot {
     }
 
     pub(crate) async fn say_with(&self, peer: PeerRef, html: &str, markup: Option<Kb>) -> Result<()> {
-        let chunks = split_message(html, 3800);
+        let mut chunks = split_message(html, 3800);
+        if chunks.is_empty() {
+            chunks.push("…(порожня відповідь)".to_string()); // never stay silent
+        }
         let last = chunks.len().saturating_sub(1);
         for (i, chunk) in chunks.iter().enumerate() {
             let mut m = InputMessage::new().html(chunk.as_str());
@@ -730,5 +814,49 @@ mod tests {
         assert_eq!(parse_scalar("on"), json!(true));
         assert_eq!(parse_scalar("15"), json!(15));
         assert_eq!(parse_scalar("07:00"), json!("07:00"));
+    }
+
+    #[test]
+    fn splitting_is_lossless_and_bounded_for_any_unicode() {
+        let atoms = ["a", "я", "🙂", "\n", "\n\n", " ", "字", "<b>", "</b>", "&amp;", "é", "İ", "\u{200d}", "x".repeat(70).leak() as &str];
+        let mut x: u64 = 0xABCDEF0123456789;
+        let mut next = |m: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % m as u64) as usize
+        };
+        for _ in 0..3000 {
+            let n = next(60);
+            let text: String = (0..n).map(|_| atoms[next(atoms.len())]).collect();
+            let max = 1 + next(80);
+            let parts = split_message(&text, max);
+            assert!(parts.iter().all(|p| p.chars().count() <= max), "chunk longer than {max}");
+            assert!(parts.iter().all(|p| !p.trim().is_empty()) || text.trim().is_empty());
+            // nothing lost except purely-blank trailing chunks
+            let joined: String = parts.concat();
+            let strip = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            assert_eq!(strip(&joined), strip(&text), "content changed for max={max}");
+            assert!(std::str::from_utf8(joined.as_bytes()).is_ok());
+        }
+        assert!(split_message("", 10).is_empty());
+        assert!(split_message("   \n  ", 10).is_empty());
+    }
+
+    #[test]
+    fn strip_html_never_panics() {
+        for t in ["<", ">", "<<>>", "<b", "b>", "&", "&amp", "🙂<🙂>🙂", &"<".repeat(10_000), &"&lt;".repeat(10_000)] {
+            let _ = strip_html(t);
+            let _ = esc(t);
+        }
+    }
+
+    #[test]
+    fn flood_wait_is_parsed_from_error_text() {
+        assert_eq!(flood_wait_secs("bot sign-in failed: request error: rpc error 420: FLOOD_WAIT caused by auth.importBotAuthorization (value: 1361)"), Some(1361));
+        assert_eq!(flood_wait_secs("FLOOD_WAIT (value: 7) trailing"), Some(7));
+        assert_eq!(flood_wait_secs("FLOOD_WAIT without number"), None);
+        assert_eq!(flood_wait_secs("value: 5 but no flood"), None);
+        assert_eq!(flood_wait_secs(""), None);
     }
 }

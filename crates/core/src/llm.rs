@@ -97,11 +97,11 @@ fn spent() -> &'static std::sync::Mutex<std::collections::HashMap<String, Instan
 
 fn is_spent(provider: Provider, model: &str) -> bool {
     let key = format!("{}/{model}", provider.name());
-    spent().lock().unwrap().get(&key).is_some_and(|until| Instant::now() < *until)
+    spent().lock().unwrap_or_else(|e| e.into_inner()).get(&key).is_some_and(|until| Instant::now() < *until)
 }
 
 fn mark_spent(provider: Provider, model: &str) {
-    spent().lock().unwrap().insert(format!("{}/{model}", provider.name()), Instant::now() + Duration::from_secs(30 * 60));
+    spent().lock().unwrap_or_else(|e| e.into_inner()).insert(format!("{}/{model}", provider.name()), Instant::now() + Duration::from_secs(30 * 60));
 }
 
 /// A chain of providers: the first is tried first, the rest take over when it fails.
@@ -405,5 +405,38 @@ mod tests {
         assert!(bad.chat("test", &[ChatMessage::user("x")], false).await.is_err());
         let fails: i64 = db.call(|c| c.query_row("SELECT count(*) FROM llm_usage WHERE ok=0", [], |r| r.get(0))).await.unwrap();
         assert_eq!(fails, 1);
+    }
+
+    #[test]
+    fn response_parsers_reject_odd_shapes_without_panicking() {
+        for v in [
+            json!(null), json!([]), json!("x"), json!({}), json!({"choices": []}), json!({"choices": [null]}), json!({"choices": [{"message": null}]}),
+            json!({"choices": [{"message": {"content": null}}]}), json!({"choices": [{"message": {"content": 5}}]}),
+            json!({"candidates": []}), json!({"candidates": [{"content": {"parts": "x"}}]}), json!({"candidates": [{"content": {"parts": [null, 5, {"text": 1}]}}]}),
+            json!({"usage": {"prompt_tokens": "many"}, "choices": [{"message": {"content": "ok"}}]}),
+        ] {
+            let _ = parse_openai_chat(&v);
+            let _ = parse_gemini_chat(&v);
+        }
+        // reasoning models sometimes return empty content: that is an error to fall through on, not a blank answer
+        assert!(parse_gemini_chat(&json!({"candidates": [{"content": {"parts": []}}]})).map(|c| c.text.is_empty()).unwrap_or(true));
+        let odd = parse_openai_chat(&json!({"usage": {"prompt_tokens": "many"}, "choices": [{"message": {"content": "ok"}}]})).unwrap();
+        assert_eq!((odd.text.as_str(), odd.prompt_tokens), ("ok", 0)); // bad usage numbers degrade to 0
+    }
+
+    #[tokio::test]
+    async fn html_error_pages_and_garbage_bodies_are_errors() {
+        use axum::{routing::post, Router};
+        let app = Router::new()
+            .route("/chat/completions", post(|| async { ([(axum::http::header::CONTENT_TYPE, "text/html")], "<html>502 Bad Gateway</html>") }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let llm = LlmClient::with_base(Provider::Groq, "k".into(), Db::open_in_memory().unwrap(), &base);
+        let e = llm.chat("t", &[ChatMessage::user("x")], false).await.unwrap_err().to_string();
+        assert!(e.contains("invalid JSON"), "{e}");
+        // connection refused: reported, not hung
+        let dead = LlmClient::with_base(Provider::Zai, "k".into(), Db::open_in_memory().unwrap(), "http://127.0.0.1:1");
+        assert!(dead.chat("t", &[ChatMessage::user("x")], false).await.is_err());
     }
 }

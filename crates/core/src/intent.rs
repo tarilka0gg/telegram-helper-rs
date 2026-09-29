@@ -111,4 +111,28 @@ mod tests {
         assert_eq!(json_to_sql(&Value::String("07:00".into())), Some(Sql::Text("07:00".into())));
         assert_eq!(json_to_sql(&serde_json::json!([1])), None);
     }
+
+    #[test]
+    fn parser_survives_garbage_and_type_confusion() {
+        let cases = [
+            "", "{}", "[]", "null", "true", "\"intent\"", "{\"intent\":null}", "{\"intent\":5}", "{\"intent\":\"send_message\"}",
+            "{\"intent\":\"send_message\",\"recipient\":1,\"text\":[]}", "{\"intent\":\"multi\",\"actions\":\"no\"}",
+            "{\"intent\":\"multi\",\"actions\":[null,1,{}]}", "```", "```json", "```json\n```", "{\"intent\":\"chat\",\"reply\":\"\\ud800\"}",
+            &format!("{{\"intent\":\"chat\",\"reply\":\"{}\"}}", "я".repeat(100_000)), &"[".repeat(5000), &"{\"a\":".repeat(5000),
+            "{\"intent\":\"set_setting\",\"key\":\"digest_time\",\"value\":{\"nested\":[1,2]}}", "\u{feff}{\"intent\":\"list_todos\"}",
+        ];
+        for c in cases {
+            let _ = flatten(parse_intent(c)); // must not panic or overflow the stack
+        }
+        // nested multi bombs are capped
+        let mut deep = r#"{"intent":"list_todos"}"#.to_string();
+        for _ in 0..100 {
+            deep = format!(r#"{{"intent":"multi","actions":[{deep},{deep}]}}"#).chars().take(200_000).collect();
+        }
+        let _ = flatten(parse_intent(&deep));
+        // json_to_sql never accepts structures or floats
+        assert_eq!(json_to_sql(&Value::Null), None);
+        assert_eq!(json_to_sql(&serde_json::json!(1.5)), None);
+        assert_eq!(json_to_sql(&serde_json::json!({"a": 1})), None);
+    }
 }

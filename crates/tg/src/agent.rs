@@ -79,7 +79,8 @@ impl Bot {
         if text.chars().count() > 4000 {
             return self.say(peer, "Повідомлення задовге для одного відправлення (ліміт Telegram — 4096 символів).").await;
         }
-        let found = features::find_contacts(&self.ctx, recipient).await?;
+        // Broadcast channels cannot be written to by a regular member: never offer them as recipients.
+        let found: Vec<_> = features::find_contacts(&self.ctx, recipient).await?.into_iter().filter(|(k, _)| k.peer_kind != "channel").collect();
         if found.is_empty() {
             return self.say(peer, &format!("Не знайшов контакт «{}». Спробуй /sync.", esc(recipient))).await;
         }
