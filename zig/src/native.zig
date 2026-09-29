@@ -88,12 +88,31 @@ const Cps = struct {
     }
 };
 
+/// Case folding for the alphabets we meet in contact names: Latin (incl. accents), Greek and all of
+/// Cyrillic (Ukrainian І Ї Є Ґ, Belarusian Ў, ...). "Ё" is additionally folded onto "Е" so "Артём" == "Артем".
 fn foldCp(cp: u32) u32 {
-    if (cp >= 'A' and cp <= 'Z') return cp + 32;
-    if (cp >= 0x0410 and cp <= 0x042F) return cp + 0x20;
-    if (cp == 0x0401) return 0x0451;
-    if (cp == 0x0451) return 0x0435; // ё ~ е, so "Артём" == "Артем"
-    return cp;
+    const lower: u32 = switch (cp) {
+        'A'...'Z' => cp + 32,
+        0xC0...0xD6, 0xD8...0xDE => cp + 0x20, // Latin-1 accented capitals (not ×)
+        0x0100...0x0137, 0x014A...0x0177 => if (cp % 2 == 0) cp + 1 else cp, // Latin Extended-A pairs
+        0x0139...0x0148 => if (cp % 2 == 1) cp + 1 else cp,
+        0x0178 => 0xFF,
+        0x0179...0x017E => if (cp % 2 == 1) cp + 1 else cp,
+        0x0386 => 0x03AC,
+        0x0388...0x038A => cp + 0x25,
+        0x038C => 0x03CC,
+        0x038E, 0x038F => cp + 0x3F,
+        0x0391...0x03A1, 0x03A3...0x03AB => cp + 0x20, // Greek
+        0x0400...0x040F => cp + 0x50, // Ѐ Ё Ђ Ѓ Є Ѕ І Ї Ј Љ Њ Ћ Ќ Ѝ Ў Џ
+        0x0410...0x042F => cp + 0x20, // А..Я
+        0x04C0 => 0x04CF, // palochka
+        0x04C1...0x04CD => if (cp % 2 == 1) cp + 1 else cp,
+        0x0460...0x0481, 0x048A...0x04BF, 0x04D0...0x052F => if (cp % 2 == 0) cp + 1 else cp, // Ґ Ә Ө Ү ...
+        else => cp,
+    };
+    if (lower == 0x0451) return 0x0435; // ё -> е
+    if (lower == 0x03C2) return 0x03C3; // Greek final sigma ς -> σ
+    return lower;
 }
 
 fn decode(s: []const u8) Cps {
@@ -107,26 +126,25 @@ fn decode(s: []const u8) Cps {
     return out;
 }
 
-fn levenshtein(a: []const u32, b: []const u32) usize {
-    var prev: [MAX_CP + 1]u16 = undefined;
-    var cur: [MAX_CP + 1]u16 = undefined;
-    for (0..b.len + 1) |j| prev[j] = @intCast(j);
-    for (a, 0..) |ca, i| {
-        cur[0] = @intCast(i + 1);
+/// Length of the longest common subsequence (two rolling rows of u16).
+fn lcsLen(a: []const u32, b: []const u32) usize {
+    var prev: [MAX_CP + 1]u16 = @splat(0);
+    var cur: [MAX_CP + 1]u16 = @splat(0);
+    for (a) |ca| {
+        cur[0] = 0;
         for (b, 0..) |cb, j| {
-            const sub = prev[j] + @as(u16, if (ca == cb) 0 else 1);
-            cur[j + 1] = @min(sub, @min(prev[j + 1] + 1, cur[j] + 1));
+            cur[j + 1] = if (ca == cb) prev[j] + 1 else @max(prev[j + 1], cur[j]);
         }
         prev = cur;
     }
     return prev[b.len];
 }
 
+/// Indel similarity in percent, like rapidfuzz `fuzz.ratio`: 100 * 2 * LCS / (len_a + len_b).
 fn ratio(a: []const u32, b: []const u32) u32 {
-    const m = @max(a.len, b.len);
-    if (m == 0) return 100;
-    const d = levenshtein(a, b);
-    return @intCast(((m - d) * 100) / m);
+    const total = a.len + b.len;
+    if (total == 0) return 100;
+    return @intCast((200 * lcsLen(a, b)) / total);
 }
 
 fn partialRatio(a: []const u32, b: []const u32) u32 {
@@ -189,6 +207,104 @@ fn tokenSorted(src: []const u32) Cps {
     return out;
 }
 
+const MAX_TOK = 64;
+
+/// Whitespace-separated tokens of `src` as slices into it (at most MAX_TOK).
+fn tokens(src: []const u32, out: *[MAX_TOK][]const u32) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < src.len and n < MAX_TOK) {
+        while (i < src.len and isSpace(src[i])) i += 1;
+        const s = i;
+        while (i < src.len and !isSpace(src[i])) i += 1;
+        if (i > s) {
+            out[n] = src[s..i];
+            n += 1;
+        }
+    }
+    return n;
+}
+
+/// Sorts `t[0..n]` and removes duplicates; returns the new length.
+fn sortUnique(t: *[MAX_TOK][]const u32, n: usize) usize {
+    var i: usize = 1;
+    while (i < n) : (i += 1) {
+        var j = i;
+        while (j > 0 and std.mem.order(u32, t[j], t[j - 1]) == .lt) : (j -= 1) {
+            const tmp = t[j];
+            t[j] = t[j - 1];
+            t[j - 1] = tmp;
+        }
+    }
+    var w: usize = 0;
+    for (0..n) |r| {
+        if (w == 0 or !std.mem.eql(u32, t[w - 1], t[r])) {
+            t[w] = t[r];
+            w += 1;
+        }
+    }
+    return w;
+}
+
+fn contains(t: []const []const u32, x: []const u32) bool {
+    for (t) |y| {
+        if (std.mem.eql(u32, x, y)) return true;
+    }
+    return false;
+}
+
+fn appendTokens(dst: *Cps, toks: []const []const u32) void {
+    for (toks) |tok| {
+        if (dst.len > 0 and dst.len < MAX_CP) {
+            dst.buf[dst.len] = ' ';
+            dst.len += 1;
+        }
+        const take = @min(MAX_CP - dst.len, tok.len);
+        @memcpy(dst.buf[dst.len..][0..take], tok[0..take]);
+        dst.len += take;
+    }
+}
+
+/// rapidfuzz-style token_set_ratio: compares the common words with each side's leftovers, so a query
+/// whose words are a subset of the name ("іванов оля" vs "Оля Іванова Петрівна") still scores high.
+/// No shared word -> 0; one side fully contained in the other -> 95 (below an exact match).
+fn tokenSetRatio(a: []const u32, b: []const u32) u32 {
+    var ta: [MAX_TOK][]const u32 = undefined;
+    var tb: [MAX_TOK][]const u32 = undefined;
+    const na = sortUnique(&ta, tokens(a, &ta));
+    const nb = sortUnique(&tb, tokens(b, &tb));
+    var sect: [MAX_TOK][]const u32 = undefined;
+    var dab: [MAX_TOK][]const u32 = undefined;
+    var dba: [MAX_TOK][]const u32 = undefined;
+    var ns: usize = 0;
+    var nab: usize = 0;
+    var nba: usize = 0;
+    for (ta[0..na]) |x| {
+        if (contains(tb[0..nb], x)) {
+            sect[ns] = x;
+            ns += 1;
+        } else {
+            dab[nab] = x;
+            nab += 1;
+        }
+    }
+    for (tb[0..nb]) |x| {
+        if (!contains(ta[0..na], x)) {
+            dba[nba] = x;
+            nba += 1;
+        }
+    }
+    if (ns == 0) return 0;
+    if (nab == 0 or nba == 0) return 95;
+    var s0 = Cps{};
+    appendTokens(&s0, sect[0..ns]);
+    var s1 = s0;
+    appendTokens(&s1, dab[0..nab]);
+    var s2 = s0;
+    appendTokens(&s2, dba[0..nba]);
+    return @max(ratio(s0.slice(), s1.slice()), @max(ratio(s0.slice(), s2.slice()), ratio(s1.slice(), s2.slice())));
+}
+
 export fn tgh_fuzzy_score(a: [*]const u8, a_len: usize, b: [*]const u8, b_len: usize) u32 {
     const ca = decode(a[0..a_len]);
     const cb = decode(b[0..b_len]);
@@ -197,7 +313,8 @@ export fn tgh_fuzzy_score(a: [*]const u8, a_len: usize, b: [*]const u8, b_len: u
     const ta = tokenSorted(ca.slice());
     const tb = tokenSorted(cb.slice());
     const sorted = ratio(ta.slice(), tb.slice());
-    return @max(full, @max(partial, sorted));
+    const set = tokenSetRatio(ca.slice(), cb.slice());
+    return @max(@max(full, partial), @max(sorted, set));
 }
 
 // ---------------------------------------------------------------- tests ----
@@ -231,9 +348,19 @@ test "cosine top-k wide dim uses simd + tail" {
 
 test "fuzzy" {
     try std.testing.expectEqual(@as(u32, 100), fz("Олександр", "олександр"));
+    // Ukrainian-specific letters and other alphabets fold too
+    try std.testing.expectEqual(@as(u32, 100), fz("ІВАН ЇЖАК ЄВГЕН ҐАНОК", "іван їжак євген ґанок"));
+    try std.testing.expectEqual(@as(u32, 100), fz("ÉMILE ŁUKASZ ÇA", "émile łukasz ça"));
+    try std.testing.expectEqual(@as(u32, 100), fz("ΑΛΕΞΗΣ", "αλεξης"));
     try std.testing.expect(fz("Olga Ivanova", "Ivanova Olga") >= 90);
     try std.testing.expect(fz("Артем", "Артём") >= 75);
     try std.testing.expect(fz("Оля", "Оля Петренко") >= 90);
     try std.testing.expect(fz("abc", "xyz") < 30);
+    // words of the query are a subset of the name's words, in any order
+    try std.testing.expect(fz("іванов оля", "Оля Іванова Петрівна") >= 60);
+    try std.testing.expect(fz("іванов контакт", "Контакт Номер 5 Іванов") >= 90);
+    try std.testing.expectEqual(fz("іванов контакт", "Контакт Номер 5 Іванов"), fz("Контакт Номер 5 Іванов", "іванов контакт"));
+    try std.testing.expect(fz("Мама Мама", "Мама") >= 90); // duplicate words collapse
+    try std.testing.expect(fz("оля петренко", "Оля Іванова") < 90); // one shared word is not a match
     try std.testing.expectEqual(@as(u32, 1), tgh_version());
 }

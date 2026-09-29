@@ -135,13 +135,71 @@ mod tests {
         assert_eq!(fuzzy_score("", "abc"), 0);
     }
 
+    /// Upper/lower case of a letter must never change the score: covers Ukrainian І Ї Є Ґ, Belarusian Ў,
+    /// Latin accents, Polish/Czech/Turkish letters and Greek.
+    #[test]
+    fn case_never_matters_for_supported_alphabets() {
+        let ranges: [(u32, u32); 7] = [(0x41, 0x5A), (0xC0, 0xDE), (0x100, 0x17F), (0x386, 0x3A9), (0x400, 0x42F), (0x460, 0x4FF), (0x500, 0x52F)];
+        let mut checked = 0;
+        for (lo, hi) in ranges {
+            for cp in lo..=hi {
+                let Some(ch) = char::from_u32(cp) else { continue };
+                let mut up = ch.to_uppercase();
+                let mut low = ch.to_lowercase();
+                // only 1:1 mappings (ß -> SS, İ -> i̇ change the length and are out of scope)
+                let (Some(u), None, Some(l), None) = (up.next(), up.next(), low.next(), low.next()) else { continue };
+                // skip letters whose case mapping does not round-trip (Turkish dotless ı -> I -> i)
+                if u == l || !ch.is_alphabetic() || u.to_lowercase().next() != Some(l) || l.to_uppercase().next() != Some(u) {
+                    continue;
+                }
+                let (a, b) = (format!("{u}{l}{u}"), format!("{l}{u}{l}"));
+                assert_eq!(fuzzy_score(&a, &b), 100, "U+{cp:04X} {ch}: '{a}' vs '{b}'");
+                checked += 1;
+            }
+        }
+        assert!(checked > 400, "only {checked} letters checked");
+    }
+
     #[test]
     fn fuzzy_realistic_contact_lookups() {
         assert!(fuzzy_score("оля", "Оля Іванова") >= 90);
         assert!(fuzzy_score("Олександр", "Александр") >= 75);
         assert!(fuzzy_score("Ivanova Olga", "Olga Ivanova") >= 90);
         assert!(fuzzy_score("Starfield", "Starfield | Школярі") >= 90);
+        assert!(fuzzy_score("іванов контакт", "Контакт Номер 5 Іванов") >= 90); // word subset, any order
+        assert!(fuzzy_score("Starfield Школярі", "Starfield | Школярі") >= 90);
         assert!(fuzzy_score("mama", "Максим") < 60);
         assert!(fuzzy_score("Андрій", "Максим") < 60);
+    }
+
+    /// `cargo test --release -p tgh-native -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bench_cosine_and_fuzzy() {
+        let (rows, dim) = (100_000usize, 384usize);
+        let mut r = Rng(42);
+        let m: Vec<f32> = (0..rows * dim).map(|_| r.f32()).collect();
+        let q: Vec<f32> = (0..dim).map(|_| r.f32()).collect();
+        let t = std::time::Instant::now();
+        let top = cosine_topk(&q, &m, 10);
+        let zig = t.elapsed();
+        let t = std::time::Instant::now();
+        let mut best = (0usize, f32::MIN);
+        for i in 0..rows {
+            let s = naive_cosine(&q, &m[i * dim..(i + 1) * dim]);
+            if s > best.1 {
+                best = (i, s);
+            }
+        }
+        let naive = t.elapsed();
+        assert_eq!(top[0].0 as usize, best.0);
+        println!("cosine top-10 over {rows}x{dim}: zig {zig:?} vs naive f64 loop {naive:?} ({:.1}x)", naive.as_secs_f64() / zig.as_secs_f64());
+        let names: Vec<String> = (0..5000).map(|i| format!("Контакт Номер {i} Іванов")).collect();
+        let t = std::time::Instant::now();
+        let mut hits = 0;
+        for n in &names {
+            hits += usize::from(fuzzy_score("іванов контакт", n) >= 60);
+        }
+        println!("fuzzy_score x{}: {:?} ({hits} hits)", names.len(), t.elapsed());
     }
 }
