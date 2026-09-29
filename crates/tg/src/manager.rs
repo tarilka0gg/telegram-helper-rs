@@ -37,6 +37,7 @@ struct Inner {
     client: Option<Client>,
     task: Option<JoinHandle<()>>,
     persister: Option<JoinHandle<()>>,
+    session: Option<Arc<DbSession>>,
     pending: Option<Pending>,
 }
 
@@ -55,6 +56,19 @@ pub struct Manager {
 impl Manager {
     pub fn new(ctx: Arc<Ctx>) -> Arc<Self> {
         Arc::new(Self { ctx, qr: Arc::new(QrShared { url: Default::default(), status: std::sync::Mutex::new(QrStatus::Idle) }), inner: Mutex::new(Inner::default()) })
+    }
+
+    /// A usable peer reference (with the access hash Telegram requires) from the session cache.
+    /// `None` when the chat was never seen by this session (run /sync).
+    pub async fn peer_ref(&self, kind: &str, id: i64) -> Option<grammers_client::session::types::PeerRef> {
+        use grammers_client::session::{types::PeerId, Session};
+        let session = self.inner.lock().await.session.clone()?;
+        let pid = match kind {
+            "channel" | "supergroup" => PeerId::channel(id),
+            "chat" => PeerId::chat(id),
+            _ => PeerId::user(id),
+        }?;
+        session.peer_ref(pid).await.ok().flatten()
     }
 
     pub fn qr(&self) -> Arc<QrShared> {
@@ -166,8 +180,9 @@ impl Manager {
             }
             this.inner.lock().await.client = None;
         });
-        let persister = self.spawn_persister(session);
+        let persister = self.spawn_persister(session.clone());
         let mut g = self.inner.lock().await;
+        g.session = Some(session);
         g.client = Some(client);
         g.task = Some(task);
         if let Some(old) = g.persister.replace(persister) {

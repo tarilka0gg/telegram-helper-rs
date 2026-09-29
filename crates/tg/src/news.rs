@@ -9,14 +9,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{Duration, Utc};
-use grammers_client::Client;
 use tgh_core::{
     db::repo::{self, MessageRow},
     llm::ChatMessage,
     sanitize::sanitize_html,
 };
 
-use crate::{ctx::Ctx, userbot};
+use crate::{ctx::Ctx, manager::Manager, userbot};
 
 const SYSTEM: &str = "Ты делаешь дайджест новостей из подписанных каналов. Сгруппируй по смыслу, убери дубли, \
 3–7 пунктов, HTML (<b>, <i>). В конце — названия каналов-источников. Ничего не выдумывай сверх текста постов.";
@@ -33,15 +32,19 @@ pub enum News {
     Nothing(String),
 }
 
-pub async fn build(ctx: &Arc<Ctx>, client: Option<&Client>, topic: Option<&str>) -> Result<News> {
+pub async fn build(ctx: &Arc<Ctx>, mgr: &Manager, topic: Option<&str>) -> Result<News> {
     let uid = ctx.user_id;
     let sources = ctx.db.call(move |c| repo::news_sources(c, uid)).await?;
     if sources.is_empty() {
         return Ok(News::Nothing("Немає каналів-джерел. Познач їх на сторінці /chats у веб-інтерфейсі або командою /sources Назва.".into()));
     }
-    if let Some(client) = client {
+    if let Some(client) = mgr.client().await {
         for (peer_id, kind, name) in &sources {
-            if let Err(e) = userbot::backfill_peer(ctx, client, *peer_id, kind, 15).await {
+            let Some(pref) = mgr.peer_ref(kind, *peer_id).await else {
+                tracing::warn!("news source '{name}' is not in the session cache yet (run /sync)");
+                continue;
+            };
+            if let Err(e) = userbot::backfill_peer(ctx, &client, pref, *peer_id, 15).await {
                 tracing::warn!("news backfill '{name}' failed: {e:#}");
             }
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;

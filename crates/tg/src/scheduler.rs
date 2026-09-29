@@ -20,6 +20,10 @@ pub fn spawn_all(bot: Arc<Bot>) {
 }
 
 async fn owner(bot: &Bot) -> Option<grammers_client::session::types::PeerRef> {
+    // The reference learned from the owner's own messages carries the access hash; the ambient one is a last resort.
+    if let Some(r) = bot.owner_ref.lock().await.clone() {
+        return Some(r);
+    }
     PeerId::user(bot.ctx.cfg.owner_telegram_id).map(PeerId::to_ambient_ref)
 }
 

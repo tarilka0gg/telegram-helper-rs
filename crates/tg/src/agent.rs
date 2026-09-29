@@ -2,10 +2,7 @@
 //! (sending) goes through a stored pending action + inline confirmation.
 
 use anyhow::Result;
-use grammers_client::{
-    message::InputMessage,
-    session::types::{PeerId, PeerRef},
-};
+use grammers_client::{message::InputMessage, session::types::PeerRef};
 use serde::{Deserialize, Serialize};
 use tgh_core::{db::repo, intent::Intent};
 
@@ -20,15 +17,6 @@ struct SendPayload {
     peer_id: Option<i64>,
     name: Option<String>,
     kind: Option<String>,
-}
-
-pub fn peer_ref_of(kind: &str, id: i64) -> Option<PeerRef> {
-    let pid = match kind {
-        "channel" | "supergroup" => PeerId::channel(id),
-        "chat" => PeerId::chat(id),
-        _ => PeerId::user(id),
-    }?;
-    Some(pid.to_ambient_ref())
 }
 
 impl Bot {
@@ -128,7 +116,7 @@ impl Bot {
         let p: SendPayload = serde_json::from_str(&raw)?;
         let (Some(peer_id), Some(kind)) = (p.peer_id, p.kind.as_deref()) else { return self.say(peer, "Не вибрано отримувача.").await };
         let Some(client) = self.mgr.client().await else { return self.say(peer, "Userbot не підключено — /login.").await };
-        let Some(target) = peer_ref_of(kind, peer_id) else { return self.say(peer, "Некоректний отримувач.").await };
+        let Some(target) = self.mgr.peer_ref(kind, peer_id).await else { return self.say(peer, "Цей чат ще не в кеші сесії — виконай /sync і спробуй знову.").await };
         match client.send_message(target, InputMessage::new().text(p.text.clone())).await {
             Ok(_) => {
                 self.ctx.event("send", Some(peer_id), None).await;
@@ -181,29 +169,64 @@ impl Bot {
             })
             .await?;
         if let (Some(kind), Some(client)) = (kind, self.mgr.client().await) {
-            let live = if mirror {
-                crate::userbot::backfill_peer(&self.ctx, &client, peer_id, &kind, 60).await.map(|_| None)
-            } else {
-                crate::userbot::fetch_recent(&client, peer_id, &kind, 60).await.map(Some)
-            };
-            match live {
-                Ok(Some(rows)) => return Ok(rows),
-                Ok(None) => {}
-                Err(e) => tracing::warn!("live fetch for '{name}' failed, using stored messages: {e:#}"),
+            match self.mgr.peer_ref(&kind, peer_id).await {
+                None => tracing::warn!("'{name}' is not in the session cache (run /sync); using stored messages"),
+                Some(pref) => {
+                    let live = if mirror {
+                        crate::userbot::backfill_peer(&self.ctx, &client, pref, peer_id, 60).await.map(|_| None)
+                    } else {
+                        crate::userbot::fetch_recent(&client, pref, peer_id, 60).await.map(Some)
+                    };
+                    match live {
+                        Ok(Some(rows)) => return Ok(rows),
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("live fetch for '{name}' failed, using stored messages: {e:#}"),
+                    }
+                }
             }
         }
         features::history(&self.ctx, peer_id, 60).await
     }
 
+    /// "Which chat was that?": local full-text search first, then Telegram's own global search
+    /// (which also covers chats that were never mirrored).
     async fn find_in_chats(&self, query: &str, action: &str, peer: PeerRef) -> Result<()> {
         let (uid, q) = (self.ctx.user_id, query.to_string());
-        let hits = self.ctx.db.call(move |c| repo::chats_matching(c, uid, &q, 5)).await?;
+        let mut hits = self.ctx.db.call(move |c| repo::chats_matching(c, uid, &q, 5)).await?;
         if hits.is_empty() {
-            return self.say(peer, "У локальній базі таких розмов немає.").await;
+            hits = self.live_chat_search(query).await;
+        }
+        if hits.is_empty() {
+            return self.say(peer, "Не знайшов розмов за цим запитом ні в базі, ні в Telegram.").await;
         }
         let action = match action { "summary" | "tasks" | "draft" | "catchup" => action, _ => "catchup" };
         let rows: Kb = hits.iter().map(|(id, name, n)| vec![btn(format!("{name} ({n})"), format!("c:{action}:{id}"))]).collect();
         self.say_with(peer, "Знайшов такі чати — обери:", Some(rows)).await
+    }
+
+    /// Telegram-side search across all chats: (peer_id, name, hits), best first.
+    async fn live_chat_search(&self, query: &str) -> Vec<(i64, String, i64)> {
+        let Some(client) = self.mgr.client().await else { return vec![] };
+        let mut found: std::collections::HashMap<i64, (String, i64)> = Default::default();
+        let mut it = client.search_all_messages().query(query).limit(40);
+        loop {
+            match it.next().await {
+                Ok(Some(m)) => {
+                    if let (Some(p), Some(id)) = (m.peer(), m.peer_id().bare_id()) {
+                        found.entry(id).or_insert_with(|| (p.name().unwrap_or("?").to_string(), 0)).1 += 1;
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("global search failed: {e}");
+                    break;
+                }
+            }
+        }
+        let mut v: Vec<(i64, String, i64)> = found.into_iter().map(|(id, (n, c))| (id, n, c)).collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        v.truncate(5);
+        v
     }
 
     async fn add_reminder(&self, text: &str, when: Option<&str>, peer_query: Option<&str>, peer: PeerRef) -> Result<()> {
@@ -222,8 +245,7 @@ impl Bot {
     /// `/news [topic]`: fetch, dedupe, digest. Marks posts as sent only after delivery succeeded.
     pub(crate) async fn news_digest(&self, topic: &str, _hours: i64, peer: PeerRef) -> Result<()> {
         let topic = Some(topic.trim()).filter(|t| !t.is_empty());
-        let client = self.mgr.client().await;
-        match crate::news::build(&self.ctx, client.as_ref(), topic).await? {
+        match crate::news::build(&self.ctx, &self.mgr, topic).await? {
             crate::news::News::Nothing(why) => self.say(peer, &esc(&why)).await,
             crate::news::News::Digest(pack) => {
                 self.say(peer, &pack.html).await?;

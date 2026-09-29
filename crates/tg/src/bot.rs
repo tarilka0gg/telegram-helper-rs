@@ -51,6 +51,8 @@ pub struct Bot {
     memory: Mutex<VecDeque<(String, String)>>,
     /// The last "which one?" question: (action, candidates). Lets "both" / "all of them" answer it.
     last_pick: Mutex<Option<(String, Vec<(i64, String)>)>>,
+    /// How the bot addresses the owner (with access hash). Learned from the owner's first message, then persisted.
+    pub owner_ref: Mutex<Option<PeerRef>>,
 }
 
 pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
@@ -58,12 +60,13 @@ pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
     if !conn.client.is_authorized().await.map_err(|e| anyhow::anyhow!("{e}"))? {
         conn.client.bot_sign_in(&ctx.cfg.bot_token, &ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("bot sign-in failed: {e}"))?;
     }
-    let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default() });
+    let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default(), owner_ref: Mutex::default() });
     let mut stream = conn
         .client
         .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, ..Default::default() })
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
+    bot.load_owner_ref().await;
     crate::scheduler::spawn_all(bot.clone());
     tracing::info!("control bot: listening");
     loop {
@@ -170,6 +173,24 @@ impl Bot {
         Ok(())
     }
 
+    async fn load_owner_ref(&self) {
+        let stored = self.ctx.db.call(|c| c.query_row("SELECT detail FROM events WHERE kind = 'owner_ref' ORDER BY id DESC LIMIT 1", [], |r| r.get::<_, String>(0))).await;
+        if let Some(r) = stored.ok().and_then(|j| serde_json::from_str::<PeerRef>(&j).ok()) {
+            *self.owner_ref.lock().await = Some(r);
+        }
+    }
+
+    async fn remember_owner(&self, peer: PeerRef) {
+        let mut g = self.owner_ref.lock().await;
+        if g.as_ref().map(|p| p.id) == Some(peer.id) && g.is_some() {
+            return;
+        }
+        *g = Some(peer);
+        if let Ok(json) = serde_json::to_string(&peer) {
+            self.ctx.event("owner_ref", None, Some(json)).await;
+        }
+    }
+
     fn is_owner(&self, sender: Option<i64>) -> bool {
         sender == Some(self.ctx.cfg.owner_telegram_id)
     }
@@ -179,6 +200,7 @@ impl Bot {
         if !self.is_owner(m.sender_id().and_then(|s| s.bare_id())) || !matches!(m.peer(), Some(grammers_client::peer::Peer::User(_))) {
             return Ok(()); // strangers get no reply at all
         }
+        self.remember_owner(peer).await;
         let text = m.text().trim().to_string();
         if text.is_empty() {
             return Ok(());
