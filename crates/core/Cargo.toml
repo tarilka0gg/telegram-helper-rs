@@ -11,3 +11,9 @@ fernet.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+serde.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
