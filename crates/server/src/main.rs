@@ -21,6 +21,11 @@ async fn main() -> anyhow::Result<()> {
         return web::serve(&addr, web::AppState { db, status, mgr: None }).await;
     }
     let cfg = Config::from_env()?;
+    // `tgh-server key <openai|gemini>`: store an LLM key (read from stdin, never from argv).
+    if let Some(pos) = std::env::args().position(|a| a == "key") {
+        let provider = std::env::args().nth(pos + 1).unwrap_or_default();
+        return store_key(&cfg, &provider).await;
+    }
     let db = Db::open(&cfg.db_path())?;
     let status = Arc::new(Status::default());
     let web_addr = cfg.web_addr.clone();
@@ -40,5 +45,28 @@ async fn main() -> anyhow::Result<()> {
         r = bot::run(ctx, mgr) => r?,
         r = web => r??,
     }
+    Ok(())
+}
+
+async fn store_key(cfg: &Config, provider: &str) -> anyhow::Result<()> {
+    use tgh_core::{crypto::Crypto, db::repo, llm::{LlmClient, Provider}};
+    let Some(p) = Provider::parse(provider) else { anyhow::bail!("usage: echo KEY | tgh-server key <openai|gemini>") };
+    let mut key = String::new();
+    std::io::stdin().read_line(&mut key)?;
+    let key = key.trim().to_string();
+    let db = Db::open(&cfg.db_path())?;
+    if !LlmClient::new(p, key.clone(), db.clone()).validate().await {
+        anyhow::bail!("the provider rejected this key — not stored");
+    }
+    let enc = Crypto::new(&cfg.encryption_key)?.encrypt(&key);
+    let (owner, name) = (cfg.owner_telegram_id, p.name());
+    db.call(move |c| {
+        let uid = repo::ensure_user(c, owner)?;
+        repo::set_api_key(c, uid, name, &enc)?;
+        repo::set_setting(c, uid, "llm_provider", name.to_string().into())?;
+        Ok(())
+    })
+    .await?;
+    println!("{name} key stored (encrypted); provider set to {name}");
     Ok(())
 }

@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 use crate::{
@@ -160,15 +160,43 @@ impl LlmClient {
     }
 }
 
+/// Transient provider errors worth retrying (rate limit / overload).
+fn is_transient(status: reqwest::StatusCode) -> bool {
+    matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
+}
+
 async fn send(req: reqwest::RequestBuilder) -> Result<Value> {
-    let resp = req.send().await.context("LLM request failed")?;
+    let mut delay = Duration::from_millis(800);
+    for attempt in 0..3 {
+        let this = req.try_clone().context("request not cloneable")?;
+        match send_once(this).await {
+            Err(SendErr::Transient(e)) if attempt < 2 => {
+                tracing::warn!("LLM transient error, retrying in {delay:?}: {e}");
+                tokio::time::sleep(delay).await;
+                delay *= 3;
+            }
+            Err(SendErr::Transient(e)) | Err(SendErr::Fatal(e)) => return Err(e),
+            Ok(v) => return Ok(v),
+        }
+    }
+    unreachable!("loop returns on the last attempt")
+}
+
+enum SendErr {
+    Transient(anyhow::Error),
+    Fatal(anyhow::Error),
+}
+
+async fn send_once(req: reqwest::RequestBuilder) -> std::result::Result<Value, SendErr> {
+    let resp = req.send().await.map_err(|e| SendErr::Transient(anyhow::anyhow!("LLM request failed: {e}")))?;
     let status = resp.status();
-    let body = resp.text().await.context("LLM response unreadable")?;
+    let body = resp.text().await.map_err(|e| SendErr::Transient(anyhow::anyhow!("LLM response unreadable: {e}")))?;
     if !status.is_success() {
         // Provider error bodies can echo request data; keep only a short prefix.
-        bail!("LLM HTTP {status}: {}", body.chars().take(200).collect::<String>());
+        let e = anyhow::anyhow!("LLM HTTP {status}: {}", body.chars().take(200).collect::<String>());
+        return Err(if is_transient(status) { SendErr::Transient(e) } else { SendErr::Fatal(e) });
     }
-    serde_json::from_str(&body).context("LLM returned invalid JSON")
+    serde_json::from_str(&body).map_err(|e| SendErr::Fatal(anyhow::anyhow!("LLM returned invalid JSON: {e}")))
 }
 
 pub fn openai_chat_body(model: &str, messages: &[ChatMessage]) -> Value {
@@ -228,6 +256,30 @@ mod tests {
         assert_eq!(b["contents"][1]["role"], "model");
         let c = parse_gemini_chat(&json!({"candidates":[{"content":{"parts":[{"text":"he"},{"text":"llo"}]}}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}})).unwrap();
         assert_eq!((c.text.as_str(), c.prompt_tokens), ("hello", 3));
+    }
+
+    #[tokio::test]
+    async fn retries_transient_503_then_succeeds() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        use std::sync::{atomic::{AtomicUsize, Ordering}, Arc};
+        let hits = Arc::new(AtomicUsize::new(0));
+        let h = hits.clone();
+        let app = Router::new().route("/chat/completions", post(move || {
+            let h = h.clone();
+            async move {
+                if h.fetch_add(1, Ordering::SeqCst) < 2 {
+                    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"busy"})))
+                } else {
+                    (StatusCode::OK, Json(json!({"choices":[{"message":{"content":"ok"}}]})))
+                }
+            }
+        }));
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        let llm = LlmClient::with_base(Provider::OpenAi, "k".into(), Db::open_in_memory().unwrap(), &base);
+        assert_eq!(llm.chat("t", &[ChatMessage::user("x")], false).await.unwrap(), "ok");
+        assert_eq!(hits.load(Ordering::SeqCst), 3);
     }
 
     /// Full path against a local fake OpenAI endpoint: checks auth header, parsing and analytics row.
