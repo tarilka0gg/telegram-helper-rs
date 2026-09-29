@@ -297,7 +297,7 @@ impl Bot {
             "todos" => self.todos(peer).await,
             "chat" => self.chat_pick(arg, "menu", peer).await,
             "catchup" => self.chat_pick(arg, "catchup", peer).await,
-            "send" | "digest" | "news" | "sources" | "index" => self.extra_command(cmd, arg, peer).await,
+            "send" | "digest" | "news" | "topics" | "classify" | "sources" | "index" => self.extra_command(cmd, arg, peer).await,
             _ => self.say(peer, "Невідома команда. /help").await,
         }
     }
@@ -561,7 +561,7 @@ const HELP: &str = "<b>TelegramHelper</b> — асистент для твого
 <b>Ключі</b>: <code>/key openai sk-…</code> · <code>/key gemini …</code>\n\
 <b>Налаштування</b>: /settings · <code>/set ключ значення</code>\n\
 <b>Чати</b>: <code>/chat Ім'я</code> · <code>/catchup Ім'я</code> · <code>/send інструкція</code> · <code>/search текст</code>\n\
-<b>Пам'ять</b>: /todos · /digest · <code>/news тема</code> · <code>/sources Ім'я</code>\n\n\
+<b>Пам'ять</b>: /todos · /digest · /news [тема] · /topics · /classify · <code>/sources Ім'я</code>\n<b>Чати й канали (галочки, іконки)</b>: веб-інтерфейс, сторінка /chats\n\n\
 Або просто пиши словами: «напиши Олі, що дзвінок о 8», «нагадай завтра о 18:00 подзвонити мамі».\n\
 Усе, що бачать інші (відправка), — лише після підтвердження кнопкою.";
 

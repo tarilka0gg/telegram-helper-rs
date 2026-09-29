@@ -1,7 +1,7 @@
 //! Persistence operations used by the Telegram side, schedulers and the LLM layer.
 //! Everything is scoped by `user_id` (the internal `users.id`, not the Telegram id).
 
-use rusqlite::{params, Connection, OptionalExtension, Result};
+use rusqlite::{params, Connection, OptionalExtension, Result, Row};
 
 pub const TS_FMT: &str = "%Y-%m-%d %H:%M:%S";
 
@@ -392,6 +392,122 @@ pub fn event_since(c: &Connection, kind: &str, since: &str, detail: Option<&str>
     Ok(n > 0)
 }
 
+// ---- chats page, categories, news dedupe -----------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ContactFull {
+    pub peer_id: i64,
+    pub name: String,
+    pub username: Option<String>,
+    pub kind: String,
+    pub category: Option<String>,
+    pub is_news_source: bool,
+    pub mirror: bool,
+    pub is_archived: bool,
+    pub is_bot: bool,
+    pub messages: i64,
+}
+
+pub fn list_contacts_full(c: &Connection, user_id: i64) -> Result<Vec<ContactFull>> {
+    let mut st = c.prepare(
+        "SELECT k.peer_id, k.display_name, k.username, k.peer_kind, k.category, k.is_news_source, k.mirror, k.is_archived, k.is_bot,
+                (SELECT count(*) FROM messages m WHERE m.user_id = k.user_id AND m.peer_id = k.peer_id)
+         FROM contacts k WHERE k.user_id = ? ORDER BY k.is_news_source DESC, k.display_name COLLATE NOCASE",
+    )?;
+    let rows = st.query_map([user_id], |r| {
+        Ok(ContactFull { peer_id: r.get(0)?, name: r.get(1)?, username: r.get(2)?, kind: r.get(3)?, category: r.get(4)?, is_news_source: r.get(5)?, mirror: r.get(6)?, is_archived: r.get(7)?, is_bot: r.get(8)?, messages: r.get(9)? })
+    })?;
+    rows.collect()
+}
+
+/// Partial update from the web UI; only the given fields change. `category` is length-limited.
+pub fn update_contact_flags(c: &Connection, user_id: i64, peer_id: i64, news_source: Option<bool>, mirror: Option<bool>, category: Option<&str>) -> Result<bool> {
+    let n = c.execute(
+        "UPDATE contacts SET is_news_source = COALESCE(?1, is_news_source), mirror = COALESCE(?2, mirror), category = COALESCE(?3, category)
+         WHERE user_id = ?4 AND peer_id = ?5",
+        params![news_source, mirror, category.map(|s| s.chars().take(32).collect::<String>()), user_id, peer_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Unknown chats are mirrored (the default), so a new conversation is never silently dropped.
+pub fn mirror_enabled(c: &Connection, user_id: i64, peer_id: i64) -> Result<bool> {
+    Ok(c.query_row("SELECT mirror FROM contacts WHERE user_id = ? AND peer_id = ?", params![user_id, peer_id], |r| r.get(0)).optional()?.unwrap_or(true))
+}
+
+/// News sources: (peer_id, kind, name).
+pub fn news_sources(c: &Connection, user_id: i64) -> Result<Vec<(i64, String, String)>> {
+    let mut st = c.prepare("SELECT peer_id, peer_kind, display_name FROM contacts WHERE user_id = ? AND is_news_source = 1 AND mirror = 1 ORDER BY display_name")?;
+    let rows = st.query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+const NEWS_FROM: &str = "FROM messages m
+    JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id AND k.is_news_source = 1 AND k.mirror = 1
+    WHERE m.user_id = ?1 AND m.text IS NOT NULL AND trim(m.text) <> ''
+      AND (?3 IS NULL OR lower(m.text) LIKE '%' || lower(?3) || '%')
+      AND NOT EXISTS (SELECT 1 FROM news_sent s WHERE s.user_id = m.user_id AND s.peer_id = m.peer_id AND s.message_id = m.message_id)";
+
+fn news_row(r: &Row) -> Result<MessageRow> {
+    Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?, is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+}
+
+/// Posts from news sources since `since` that were never included in a digest.
+pub fn news_unsent(c: &Connection, user_id: i64, since: &str, topic: Option<&str>, limit: i64) -> Result<Vec<MessageRow>> {
+    let sql = format!("SELECT m.peer_id, m.message_id, m.sender_id, k.display_name, m.is_outgoing, m.date, m.kind, m.text {NEWS_FROM} AND m.date >= ?2 ORDER BY m.date DESC LIMIT ?4");
+    let mut st = c.prepare(&sql)?;
+    let rows = st.query_map(params![user_id, since, topic, limit], news_row)?;
+    rows.collect()
+}
+
+/// Fallback when nothing is new today: the latest unsent post(s) of each source, whatever their age.
+pub fn news_latest_unsent(c: &Connection, user_id: i64, topic: Option<&str>, per_source: i64) -> Result<Vec<MessageRow>> {
+    let sql = format!(
+        "SELECT peer_id, message_id, sender_id, name, is_outgoing, date, kind, text FROM (
+            SELECT m.peer_id AS peer_id, m.message_id AS message_id, m.sender_id AS sender_id, k.display_name AS name,
+                   m.is_outgoing AS is_outgoing, m.date AS date, m.kind AS kind, m.text AS text,
+                   ROW_NUMBER() OVER (PARTITION BY m.peer_id ORDER BY m.date DESC) AS rn {NEWS_FROM}
+         ) WHERE rn <= ?2 ORDER BY date DESC"
+    );
+    let mut st = c.prepare(&sql)?;
+    let rows = st.query_map(params![user_id, per_source, topic], news_row)?;
+    rows.collect()
+}
+
+pub fn mark_news_sent(c: &Connection, user_id: i64, posts: &[(i64, i64)]) -> Result<()> {
+    for (peer, msg) in posts {
+        c.execute("INSERT OR IGNORE INTO news_sent(user_id, peer_id, message_id) VALUES (?1, ?2, ?3)", params![user_id, peer, msg])?;
+    }
+    Ok(())
+}
+
+/// Rows for the LLM classifier: (peer_id, name, username, kind, up to 3 recent text snippets).
+pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> Result<Vec<(i64, String, Option<String>, String, Vec<String>)>> {
+    let mut st = c.prepare("SELECT peer_id, display_name, username, peer_kind FROM contacts WHERE user_id = ? AND is_bot = 0 AND category IS NULL ORDER BY display_name LIMIT ?")?;
+    let base = st.query_map(params![user_id, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))?.collect::<Result<Vec<_>>>()?;
+    let mut snip = c.prepare("SELECT substr(text, 1, 120) FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND text IS NOT NULL AND trim(text) <> '' ORDER BY date DESC LIMIT 3")?;
+    let mut out = Vec::with_capacity(base.len());
+    for (id, name, user, kind) in base {
+        let s = snip.query_map(params![user_id, id], |r| r.get(0))?.collect::<Result<Vec<String>>>()?;
+        out.push((id, name, user, kind, s));
+    }
+    Ok(out)
+}
+
+/// Stores categories from the classifier; channels judged "news" become news sources.
+/// Existing manual choices are never overridden: only rows without a category are touched.
+pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String, bool)]) -> Result<usize> {
+    let mut n = 0;
+    for (peer_id, category, news) in items {
+        n += c.execute(
+            "UPDATE contacts SET category = ?1, is_news_source = CASE WHEN ?2 AND peer_kind = 'channel' THEN 1 ELSE is_news_source END
+             WHERE user_id = ?3 AND peer_id = ?4 AND category IS NULL",
+            params![category, news, user_id, peer_id],
+        )?;
+    }
+    Ok(n)
+}
+
 // ---- auto-reply ------------------------------------------------------------
 
 pub fn last_auto_reply_at(c: &Connection, user_id: i64, peer_id: i64) -> Result<Option<String>> {
@@ -492,5 +608,47 @@ mod tests {
         assert!(last_auto_reply_at(&c, u, 5).unwrap().is_none());
         log_auto_reply(&c, u, 5, "Оля", "hi", "busy").unwrap();
         assert!(last_auto_reply_at(&c, u, 5).unwrap().is_some());
+    }
+
+    #[test]
+    fn news_dedupe_fallback_and_classification() {
+        let c = db();
+        let u = ensure_user(&c, 1).unwrap();
+        let ch = |id: i64, name: &str, kind: &str| ContactRow { peer_id: id, peer_kind: kind.into(), is_bot: false, is_archived: false, display_name: name.into(), username: None };
+        upsert_contact(&c, u, &ch(10, "Tech News", "channel")).unwrap();
+        upsert_contact(&c, u, &ch(11, "Family", "chat")).unwrap();
+        let post = |peer: i64, id: i64, date: &str, text: &str| MessageRow { peer_id: peer, message_id: id, sender_id: None, sender_name: None, is_outgoing: false, date: date.into(), kind: "text".into(), text: Some(text.into()) };
+        save_message(&c, u, &post(10, 1, "2020-01-01 10:00:00", "old rust news")).unwrap();
+        save_message(&c, u, &post(10, 2, "2020-01-02 10:00:00", "older ai news")).unwrap();
+        save_message(&c, u, &post(11, 1, "2020-01-03 10:00:00", "dinner?")).unwrap();
+
+        // nothing is a news source yet
+        assert!(news_latest_unsent(&c, u, None, 1).unwrap().is_empty());
+        // classifier: channel -> news source, group -> only a category; manual choices survive
+        let rows = contacts_for_classification(&c, u, 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(apply_classification(&c, u, &[(10, "news".into(), true), (11, "family".into(), true)]).unwrap(), 2);
+        assert_eq!(apply_classification(&c, u, &[(10, "other".into(), false)]).unwrap(), 0); // already classified
+        assert_eq!(news_sources(&c, u).unwrap().len(), 1); // the group was not turned into a source
+
+        // nothing in the last day -> fallback returns the single latest post per source
+        assert!(news_unsent(&c, u, "2030-01-01 00:00:00", None, 10).unwrap().is_empty());
+        let latest = news_latest_unsent(&c, u, None, 1).unwrap();
+        assert_eq!((latest.len(), latest[0].message_id), (1, 2));
+        assert_eq!(news_latest_unsent(&c, u, Some("RUST"), 5).unwrap().len(), 1);
+
+        // once delivered, never again
+        mark_news_sent(&c, u, &[(10, 2)]).unwrap();
+        let next = news_latest_unsent(&c, u, None, 1).unwrap();
+        assert_eq!(next[0].message_id, 1);
+        mark_news_sent(&c, u, &[(10, 1)]).unwrap();
+        assert!(news_latest_unsent(&c, u, None, 3).unwrap().is_empty());
+
+        // web toggles
+        assert!(update_contact_flags(&c, u, 10, Some(false), Some(false), None).unwrap());
+        assert!(!mirror_enabled(&c, u, 10).unwrap());
+        assert!(mirror_enabled(&c, u, 999).unwrap()); // unknown chat: mirrored by default
+        let full = list_contacts_full(&c, u).unwrap();
+        assert_eq!(full.iter().find(|k| k.peer_id == 10).map(|k| (k.is_news_source, k.messages)), Some((false, 2)));
     }
 }

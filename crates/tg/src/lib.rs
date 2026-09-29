@@ -1,9 +1,11 @@
 pub mod agent;
 pub mod bot;
+pub mod classify;
 pub mod ctx;
 pub mod dbsession;
 pub mod features;
 pub mod login;
 pub mod manager;
+pub mod news;
 pub mod scheduler;
 pub mod userbot;

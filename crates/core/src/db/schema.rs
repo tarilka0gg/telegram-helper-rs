@@ -182,12 +182,40 @@ CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts);
     )
 }
 
+/// v2: chat categories (auto-classified), per-chat mirror switch, and dedupe of news already delivered.
+fn migration_v2(conn: &Connection) -> rusqlite::Result<()> {
+    let has = |col: &str| -> rusqlite::Result<bool> {
+        let mut st = conn.prepare("SELECT 1 FROM pragma_table_info('contacts') WHERE name = ?")?;
+        st.exists([col])
+    };
+    // ALTER has no IF NOT EXISTS, so guard for DBs that already have the column.
+    if !has("category")? {
+        conn.execute_batch("ALTER TABLE contacts ADD COLUMN category TEXT;")?;
+    }
+    if !has("mirror")? {
+        conn.execute_batch("ALTER TABLE contacts ADD COLUMN mirror BOOLEAN NOT NULL DEFAULT 1;")?;
+    }
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS news_sent (
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            peer_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL,
+            sent_at {TS},
+            PRIMARY KEY (user_id, peer_id, message_id)
+        );"
+    ))
+}
+
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")?;
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version < 1 {
         // IF NOT EXISTS everywhere: safe on top of a DB created by the Python app.
         conn.execute_batch(&format!("BEGIN;{}PRAGMA user_version = 1;COMMIT;", migration_v1()))?;
+    }
+    if version < 2 {
+        migration_v2(conn)?;
+        conn.execute_batch("PRAGMA user_version = 2;")?;
     }
     Ok(())
 }

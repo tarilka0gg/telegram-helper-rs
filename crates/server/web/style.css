@@ -20,3 +20,15 @@ svg { width:100%; height:auto; display:block; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th { text-align:left; color:var(--muted); font-weight:500; } th, td { padding:4px 6px; border-bottom:1px solid var(--line); }
 .muted { color:var(--muted); }
+header a { color: var(--muted); font-size: 13px; }
+input[type=search] { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; min-width: 200px; }
+.tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.tabs button { background: var(--card); color: var(--fg); border: 1px solid var(--line); border-radius: 99px; padding: 3px 11px; cursor: pointer; font: inherit; }
+.tabs button.on { border-color: var(--in); color: var(--in); }
+.list .row { display: grid; grid-template-columns: 36px minmax(140px, 1fr) 90px 70px 90px 100px; align-items: center; gap: 10px; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+.list .row.arch { opacity: .55; }
+.ava { width: 32px; height: 32px; border-radius: 50%; overflow: hidden; display: grid; place-items: center; background: var(--line); font-size: 18px; }
+.ava img { width: 32px; height: 32px; object-fit: cover; }
+.name small, .cat, .msgs { color: var(--muted); font-size: 12px; }
+.chk { cursor: pointer; user-select: none; } .chk.off { color: var(--muted); text-align: center; cursor: default; }
+@media (max-width: 720px) { .list .row { grid-template-columns: 36px 1fr; } .cat, .msgs { display: none; } }

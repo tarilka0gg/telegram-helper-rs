@@ -15,6 +15,7 @@ pub fn spawn_all(bot: Arc<Bot>) {
     tokio::spawn(digest_loop(bot.clone()));
     tokio::spawn(news_loop(bot.clone()));
     tokio::spawn(reminders_loop(bot.clone()));
+    tokio::spawn(classify_loop(bot.clone()));
     tokio::spawn(sync_loop(bot));
 }
 
@@ -71,6 +72,8 @@ async fn news_loop(bot: Arc<Bot>) {
         let Ok(topics) = bot.ctx.db.call(move |c| repo::list_news_topics(c, uid)).await else { continue };
         let Some(peer) = owner(&bot).await else { continue };
         bot.ctx.event("news_sent", None, None).await;
+        // No topics configured: one general digest of all sources.
+        let topics = if topics.is_empty() { vec![(String::new(), 24)] } else { topics };
         for (topic, hours) in topics {
             if let Err(e) = bot.news_digest(&topic, hours, peer).await {
                 tracing::warn!("news digest '{topic}' failed: {e:#}");
@@ -117,6 +120,43 @@ async fn sync_loop(bot: Arc<Bot>) {
         if let Some(client) = bot.mgr.client().await {
             if let Err(e) = userbot::sync_dialogs(&bot.ctx, &client).await {
                 tracing::warn!("hourly sync failed: {e:#}");
+            }
+        }
+    }
+}
+
+/// First run: once the userbot is connected and an LLM key exists, sort all chats/channels by context
+/// and tell the owner where to review the result. Happens once; `/classify` handles later additions.
+/// A flaky LLM gets three attempts (5 min apart) before we give up quietly.
+async fn classify_loop(bot: Arc<Bot>) {
+    let mut attempts = 0;
+    loop {
+        tokio::time::sleep(if attempts == 0 { TICK } else { Duration::from_secs(300) }).await;
+        if bot.mgr.client().await.is_none() || fired_today(&bot, "auto_classified", "1970-01-01 00:00:00".into(), None).await {
+            continue;
+        }
+        if !matches!(bot.ctx.llm().await, Ok(Some(_))) {
+            continue;
+        }
+        // Contacts must exist first (the initial dialog sync runs right after login).
+        let uid = bot.ctx.user_id;
+        if bot.ctx.db.call(move |c| repo::list_contacts(c, uid)).await.map_or(true, |v| v.is_empty()) {
+            continue;
+        }
+        attempts += 1;
+        match crate::classify::run(&bot.ctx, 400).await {
+            Ok(Some((n, news))) if n > 0 => {
+                bot.ctx.event("auto_classified", None, Some(format!("{n} chats, {news} news"))).await;
+                if let Some(peer) = owner(&bot).await {
+                    let _ = bot.say(peer, &format!(
+                        "🗂 Розклав чати й канали за контекстом: <b>{n}</b>, джерел новин: <b>{news}</b>.\nПеревір, поправ галочки й іконки: <b>http://{}/chats</b>", bot.ctx.cfg.web_addr)).await;
+                }
+            }
+            other => {
+                tracing::warn!("first-run classification attempt {attempts} produced nothing ({:?})", other.as_ref().map(|o| o.is_some()));
+                if attempts >= 3 {
+                    bot.ctx.event("auto_classified", None, Some("gave up".into())).await;
+                }
             }
         }
     }

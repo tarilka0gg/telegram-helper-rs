@@ -2,7 +2,6 @@
 //! (sending) goes through a stored pending action + inline confirmation.
 
 use anyhow::Result;
-use chrono::{Duration, Utc};
 use grammers_client::{
     message::InputMessage,
     session::types::{PeerId, PeerRef},
@@ -192,18 +191,17 @@ impl Bot {
         self.say(peer, &format!("⏰ Запам'ятав: {}{}", esc(text), when_txt.map_or(" (без дати)".into(), |w| format!(" — {w}")))).await
     }
 
-    pub(crate) async fn news_digest(&self, topic: &str, hours: i64, peer: PeerRef) -> Result<()> {
-        let Some(llm) = self.ctx.llm().await? else { return self.say(peer, "Спершу додай LLM-ключ.").await };
-        let since = repo::fmt_ts(Utc::now() - Duration::hours(hours.clamp(1, 168)));
-        let (uid, t) = (self.ctx.user_id, topic.to_string());
-        let msgs = self.ctx.db.call(move |c| repo::news_messages(c, uid, &t, &since, 40)).await?;
-        if msgs.is_empty() {
-            return self.say(peer, "У помічених каналах нічого по цій темі (канали позначаються командою /sources).").await;
+    /// `/news [topic]`: fetch, dedupe, digest. Marks posts as sent only after delivery succeeded.
+    pub(crate) async fn news_digest(&self, topic: &str, _hours: i64, peer: PeerRef) -> Result<()> {
+        let topic = Some(topic.trim()).filter(|t| !t.is_empty());
+        let client = self.mgr.client().await;
+        match crate::news::build(&self.ctx, client.as_ref(), topic).await? {
+            crate::news::News::Nothing(why) => self.say(peer, &esc(&why)).await,
+            crate::news::News::Digest(pack) => {
+                self.say(peer, &pack.html).await?;
+                crate::news::mark_sent(&self.ctx, pack.posts).await
+            }
         }
-        let body: String = msgs.iter().map(|m| format!("[{}] {}: {}", &m.date[..16.min(m.date.len())], m.sender_name.as_deref().unwrap_or("канал"), m.text.as_deref().unwrap_or("").chars().take(500).collect::<String>())).collect::<Vec<_>>().join("\n\n");
-        let sys = "Ты делаешь дайджест новостей по теме из подписанных каналов. Сгруппируй по смыслу, убери дубли, 3–7 пунктов, HTML (<b>, <i>). В конце — названия каналов-источников.";
-        let raw = llm.chat("news", &[tgh_core::llm::ChatMessage::system(sys), tgh_core::llm::ChatMessage::user(format!("Тема: {topic}\n\n{body}"))], false).await?;
-        self.say(peer, &clean(&raw)).await
     }
 
     pub(crate) async fn extra_command(&self, cmd: &str, arg: &str, peer: PeerRef) -> Result<()> {
@@ -218,13 +216,20 @@ impl Bot {
                     _ => { let _ = s; let d = features::build_digest(&self.ctx).await?; self.say(peer, &d).await }
                 }
             }
-            "news" if arg.is_empty() => {
+            "news" => self.news_digest(arg, 24, peer).await,
+            "topics" => {
                 let uid = self.ctx.user_id;
                 let topics = self.ctx.db.call(move |c| repo::list_news_topics(c, uid)).await?;
                 let list = if topics.is_empty() { "тем немає".into() } else { topics.iter().map(|(t, h)| format!("• {} ({h} год)", esc(t))).collect::<Vec<_>>().join("\n") };
-                self.say(peer, &format!("<b>Теми новин</b>\n{list}\n\nРазово: <code>/news тема</code>. Джерела: /sources Ім'я")).await
+                self.say(peer, &format!("<b>Теми ранкових новин</b>\n{list}\n\nЗараз: /news або <code>/news тема</code>. Канали-джерела — у веб-інтерфейсі /chats")).await
             }
-            "news" => self.news_digest(arg, 24, peer).await,
+            "classify" => {
+                self.say(peer, "Розкладаю чати за категоріями…").await?;
+                match crate::classify::run(&self.ctx, 400).await? {
+                    None => self.say(peer, "Спершу додай LLM-ключ.").await,
+                    Some((n, news)) => self.say(peer, &format!("Розкладено: {n}, з них джерел новин: {news}. Перевір і поправ на http://{}/chats", self.ctx.cfg.web_addr)).await,
+                }
+            }
             "sources" => {
                 let found = features::find_contacts(&self.ctx, arg).await?;
                 let Some((k, _)) = found.first() else { return self.say(peer, "Формат: <code>/sources Назва каналу</code> (перемикає джерело новин)").await };

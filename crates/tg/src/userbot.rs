@@ -99,10 +99,18 @@ pub async fn run_updates(ctx: Arc<Ctx>, conn: Connected) -> Result<()> {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break Ok(()),
             upd = stream.next() => match upd {
-                Ok(grammers_client::update::Update::NewMessage(m)) | Ok(grammers_client::update::Update::MessageEdited(m)) => {
+                Ok(grammers_client::update::Update::NewMessage(m)) => {
                     let (ctx, client) = (ctx.clone(), client.clone());
                     tokio::spawn(async move {
-                        if let Err(e) = on_message(&ctx, &client, m.into_inner()).await {
+                        if let Err(e) = on_message(&ctx, &client, m.into_inner(), false).await {
+                            tracing::warn!("message handler failed: {e:#}");
+                        }
+                    });
+                }
+                Ok(grammers_client::update::Update::MessageEdited(m)) => {
+                    let (ctx, client) = (ctx.clone(), client.clone());
+                    tokio::spawn(async move {
+                        if let Err(e) = on_message(&ctx, &client, m.into_inner(), true).await {
                             tracing::warn!("message handler failed: {e:#}");
                         }
                     });
@@ -120,28 +128,32 @@ pub async fn run_updates(ctx: Arc<Ctx>, conn: Connected) -> Result<()> {
     result
 }
 
-async fn on_message(ctx: &Arc<Ctx>, client: &Client, m: Message) -> Result<()> {
+async fn on_message(ctx: &Arc<Ctx>, client: &Client, m: Message, edited: bool) -> Result<()> {
     let Some(peer) = m.peer().cloned() else { return Ok(()) };
     let Some(peer_id) = peer.id().bare_id() else { return Ok(()) };
     let uid = ctx.user_id;
 
     let (row, contact) = (message_row(&m, peer_id), peer_row(&peer, false));
-    let is_new = ctx
-        .db
-        .call(move |c| {
-            if let Some(k) = contact {
-                // Keep the archive flag we already know: it only changes through dialog sync.
-                let archived = c.query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, k.peer_id], |r| r.get(0)).unwrap_or(false);
-                repo::upsert_contact(c, uid, &ContactRow { is_archived: archived, ..k })?;
-            }
-            repo::save_message(c, uid, &row)
-        })
-        .await?;
+    // Chats switched off in the web UI are neither stored nor counted.
+    let mirror = ctx.db.call(move |c| repo::mirror_enabled(c, uid, peer_id)).await?;
+    let is_new = mirror
+        && ctx
+            .db
+            .call(move |c| {
+                if let Some(k) = contact {
+                    // Keep flags we already know: archive state only changes through dialog sync.
+                    let archived = c.query_row("SELECT is_archived FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, k.peer_id], |r| r.get(0)).unwrap_or(false);
+                    repo::upsert_contact(c, uid, &ContactRow { is_archived: archived, ..k })?;
+                }
+                repo::save_message(c, uid, &row)
+            })
+            .await?;
     if is_new {
         ctx.event(if m.outgoing() { "msg_out" } else { "msg_in" }, Some(peer_id), None).await;
     }
 
-    if is_new && !m.outgoing() {
+    // Auto-reply only to fresh incoming private messages (an edit is not a new message).
+    if !edited && !m.outgoing() && (is_new || !mirror) {
         if let Peer::User(u) = &peer {
             if !u.is_bot() && !u.is_self() {
                 maybe_auto_reply(ctx, client, &m, &peer, peer_id).await?;
@@ -233,8 +245,10 @@ async fn smart_reply(ctx: &Arc<Ctx>, s: &repo::Settings, peer_id: i64, name: &st
 /// Refreshes contacts from the dialog list (with archive flags). Returns how many were stored.
 pub async fn sync_dialogs(ctx: &Arc<Ctx>, client: &Client) -> Result<usize> {
     let mut rows = Vec::new();
+    let mut peers = Vec::new();
     let mut dialogs = client.iter_dialogs();
     while let Some(d) = dialogs.next().await? {
+        peers.push(d.peer().clone());
         // Telegram keeps archived chats in folder 1.
         let archived = matches!(&d.raw, tl::enums::Dialog::Dialog(x) if x.folder_id == Some(1));
         if let Some(r) = peer_row(d.peer(), archived) {
@@ -253,10 +267,77 @@ pub async fn sync_dialogs(ctx: &Arc<Ctx>, client: &Client) -> Result<usize> {
         })
         .await?;
     ctx.event("sync", None, Some(format!("{n} dialogs"))).await;
+    spawn_avatar_download(ctx.clone(), client.clone(), peers);
     Ok(n)
 }
 
 /// `Peer::to_ref` with a readable error when the peer is not in the session cache.
 pub async fn peer_ref(peer: &Peer) -> Result<grammers_client::session::types::PeerRef> {
     peer.to_ref().await.map_err(|e| anyhow::anyhow!("peer ref: {e}"))?.context("peer not in session cache")
+}
+
+/// Pulls the latest posts of one chat/channel into the DB (deduplicated by message id).
+pub async fn backfill_peer(ctx: &Arc<Ctx>, client: &Client, peer_id: i64, kind: &str, limit: usize) -> Result<usize> {
+    let pref = crate::agent::peer_ref_of(kind, peer_id).context("bad peer")?;
+    let mut iter = client.iter_messages(pref).limit(limit);
+    let mut rows = Vec::new();
+    while let Some(m) = iter.next().await.map_err(|e| anyhow::anyhow!("iter_messages: {e}"))? {
+        rows.push(message_row(&m, peer_id));
+    }
+    let uid = ctx.user_id;
+    ctx.db
+        .call(move |c| {
+            let tx = c.unchecked_transaction()?;
+            let mut fresh = 0;
+            for r in &rows {
+                fresh += usize::from(repo::save_message(&tx, uid, r)?);
+            }
+            tx.commit()?;
+            Ok(fresh)
+        })
+        .await
+}
+
+pub fn avatar_path(dir: &std::path::Path, peer_id: i64) -> std::path::PathBuf {
+    dir.join(format!("{peer_id}.jpg"))
+}
+
+/// Downloads small profile pictures for the chats page (best effort, gentle on rate limits).
+pub fn spawn_avatar_download(ctx: Arc<Ctx>, client: Client, peers: Vec<Peer>) {
+    tokio::spawn(async move {
+        let dir = ctx.cfg.data_dir.join("avatars");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let mut got = 0;
+        for p in peers {
+            let Some(id) = p.id().bare_id() else { continue };
+            let path = avatar_path(&dir, id);
+            if path.exists() {
+                continue;
+            }
+            let Ok(Some(photo)) = p.photo(false).await else { continue };
+            let mut bytes = Vec::new();
+            let mut it = client.iter_download(&photo);
+            loop {
+                match it.next().await {
+                    Ok(Some(chunk)) => bytes.extend_from_slice(&chunk),
+                    Ok(None) => break,
+                    Err(_) => {
+                        bytes.clear();
+                        break;
+                    }
+                }
+                if bytes.len() > 512 * 1024 {
+                    bytes.clear();
+                    break;
+                }
+            }
+            if !bytes.is_empty() && std::fs::write(&path, &bytes).is_ok() {
+                got += 1;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+        tracing::info!("avatars: downloaded {got} new");
+    });
 }

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chats – TelegramHelper</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>Chats &amp; channels</h1>
+  <a href="/">dashboard</a>
+  <input id="q" type="search" placeholder="search name or @username">
+</header>
+<main>
+  <p class="muted"><b>📰 news</b> — channel is used for /news digests. <b>🪞 mirror</b> — messages of this chat are stored (off = ignored). Changes save instantly.</p>
+  <div id="tabs" class="tabs"></div>
+  <p id="count" class="muted"></p>
+  <div id="list" class="list"></div>
+</main>
+<script src="/chats.js"></script>
+</body>
+</html>
