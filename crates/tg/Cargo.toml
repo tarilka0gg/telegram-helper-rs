@@ -4,3 +4,8 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+grammers-client.workspace = true
+tokio.workspace = true
+tgh-core = { path = "../core" }
+anyhow.workspace = true
+tracing.workspace = true

@@ -5,6 +5,9 @@ edition.workspace = true
 
 [dependencies]
 rusqlite.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
 fernet.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
+tokio.workspace = true

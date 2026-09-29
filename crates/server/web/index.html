@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TelegramHelper</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>TelegramHelper</h1>
+  <span id="conn" class="badge">…</span>
+  <label>range <select id="days"><option value="7">7 days</option><option value="30" selected>30 days</option><option value="90">90 days</option></select></label>
+</header>
+<main>
+  <section class="kpis">
+    <div><b id="stat-messages">0</b><span>messages total</span></div>
+    <div><b id="stat-messages24">0</b><span>messages 24h</span></div>
+    <div><b id="stat-contacts">0</b><span>contacts</span></div>
+    <div><b id="stat-commitments">0</b><span>open commitments</span></div>
+    <div><b id="stat-autoreplies24">0</b><span>auto-replies 24h</span></div>
+    <div><b id="stat-llmcalls24">0</b><span>LLM calls 24h</span></div>
+    <div><b id="stat-tokens24">0</b><span>LLM tokens 24h</span></div>
+    <div><b id="stat-errors24">0</b><span>LLM errors 24h</span></div>
+  </section>
+  <section class="grid">
+    <article><h2>Messages per day <small>in / out</small></h2><svg id="chart-daily" viewBox="0 0 600 200"></svg></article>
+    <article><h2>Activity by hour (UTC)</h2><svg id="chart-hourly" viewBox="0 0 600 200"></svg></article>
+    <article><h2>LLM tokens per day <small>prompt / completion</small></h2><svg id="chart-llm" viewBox="0 0 600 200"></svg></article>
+    <article><h2>Top chats</h2><table id="tbl-top"><thead><tr><th>chat</th><th>msgs</th></tr></thead><tbody></tbody></table></article>
+    <article><h2>LLM by purpose</h2><table id="tbl-purpose"><thead><tr><th>purpose</th><th>calls</th><th>tokens</th><th>avg</th></tr></thead><tbody></tbody></table></article>
+    <article><h2>Open commitments</h2><table id="tbl-commitments"><thead><tr><th>chat</th><th>dir</th><th>text</th><th>deadline</th></tr></thead><tbody></tbody></table></article>
+    <article class="wide"><h2>Recent auto-replies</h2><table id="tbl-autoreply"><thead><tr><th>time</th><th>chat</th><th>incoming</th><th>reply</th></tr></thead><tbody></tbody></table></article>
+    <article class="wide"><h2>Events</h2><table id="tbl-events"><thead><tr><th>time</th><th>kind</th><th>peer</th><th>detail</th></tr></thead><tbody></tbody></table></article>
+  </section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>
