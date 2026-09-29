@@ -158,7 +158,7 @@ impl Bot {
         if !text.starts_with('/') && conv_now != Conv::Idle {
             return self.login_step(conv_now, &text, peer, &m).await;
         }
-        if conv_now != Conv::Idle {
+        if conv_now != Conv::Idle && !text.starts_with("/resend") {
             self.mgr.cancel_login().await; // a command aborts a half-done login
         }
 
@@ -180,9 +180,10 @@ impl Bot {
                     return self.say(peer, "Формат: <code>+380501234567</code>. Спробуй ще раз або /cancel.").await;
                 }
                 match self.mgr.begin_login(phone).await {
-                    Ok(()) => {
+                    Ok(info) => {
                         *self.conv.lock().await = Conv::Code;
-                        self.say(peer, "Код відправлено в Telegram. Введи його <b>з пробілами між цифрами</b> (<code>1 2 3 4 5</code>) — інакше Telegram анулює код, побачивши його відкрито.").await
+                        let next = info.next.as_ref().map(|n| format!("\nНе прийшов? /resend — надіслати повторно ({}).", esc(n))).unwrap_or_default();
+                        self.say(peer, &format!("Код надіслано: <b>{}</b>.\nВведи його <b>з пробілами між цифрами</b> (<code>1 2 3 4 5</code>) — інакше Telegram анулює код, побачивши його відкрито.{next}", esc(&info.via))).await
                     }
                     Err(e) => self.say(peer, &format!("Не вдалося запросити код: {}", esc(&e.to_string()))).await,
                 }
@@ -234,6 +235,13 @@ impl Bot {
                 *self.conv.lock().await = Conv::Phone;
                 self.say(peer, "Номер телефону акаунта у форматі <code>+380501234567</code>:").await
             }
+            "resend" => match self.mgr.resend_code().await {
+                Ok(info) => {
+                    *self.conv.lock().await = Conv::Code;
+                    self.say(peer, &format!("Надіслано повторно: <b>{}</b>. Введи код з пробілами.", esc(&info.via))).await
+                }
+                Err(e) => self.say(peer, &format!("Не вийшло: {}", esc(&e.to_string()))).await,
+            },
             "logout" => {
                 self.mgr.logout().await?;
                 self.say(peer, "Сесію видалено.").await

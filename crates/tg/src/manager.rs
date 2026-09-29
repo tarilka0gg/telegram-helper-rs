@@ -3,20 +3,17 @@
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use grammers_client::{
-    client::{LoginToken, PasswordToken},
-    Client, SignInError,
-};
+use grammers_client::{client::PasswordToken, Client, SignInError};
 use tgh_core::db::repo;
 use tokio::{sync::Mutex, task::JoinHandle};
 
-use crate::{ctx::Ctx, dbsession::DbSession, userbot};
+use crate::{ctx::Ctx, dbsession::DbSession, login::{self, CodeInfo, SignIn}, userbot};
 
 struct Pending {
     conn: userbot::Connected,
     session: Arc<DbSession>,
     phone: String,
-    token: Option<LoginToken>,
+    info: Option<CodeInfo>,
     password: Option<PasswordToken>,
 }
 
@@ -111,37 +108,55 @@ impl Manager {
         })
     }
 
-    pub async fn begin_login(&self, phone: &str) -> Result<()> {
+    /// Requests a login code; returns where Telegram says it delivered it.
+    pub async fn begin_login(&self, phone: &str) -> Result<CodeInfo> {
         let mut g = self.inner.lock().await;
         if let Some(old) = g.pending.take() {
             old.conn.handle.quit();
         }
         let session = DbSession::new();
         let conn = userbot::connect(session.clone(), self.ctx.cfg.api_id);
-        let token = conn.client.request_login_code(phone, &self.ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("request code: {e}"))?;
-        g.pending = Some(Pending { conn, session, phone: phone.to_string(), token: Some(token), password: None });
-        Ok(())
+        let info = match login::send_code(&conn.client, &conn.handle, &session, phone, self.ctx.cfg.api_id, &self.ctx.cfg.api_hash).await {
+            Ok(i) => i,
+            Err(e) => {
+                conn.handle.quit();
+                return Err(e);
+            }
+        };
+        tracing::info!("login code requested, delivery: {}", info.via);
+        g.pending = Some(Pending { conn, session, phone: phone.to_string(), info: Some(info.clone()), password: None });
+        Ok(info)
+    }
+
+    pub async fn resend_code(&self) -> Result<CodeInfo> {
+        let mut g = self.inner.lock().await;
+        let Some(p) = g.pending.as_mut() else { bail!("no login in progress; send /login first") };
+        let Some(info) = p.info.as_ref() else { bail!("nothing to resend") };
+        let new = login::resend_code(&p.conn.client, info).await?;
+        tracing::info!("login code resent, delivery: {}", new.via);
+        p.info = Some(new.clone());
+        Ok(new)
     }
 
     pub async fn submit_code(self: &Arc<Self>, code: &str) -> Result<CodeResult> {
         let mut g = self.inner.lock().await;
         let Some(p) = g.pending.as_mut() else { bail!("no login in progress; send /login first") };
-        let Some(token) = p.token.as_ref() else { bail!("code was already used") };
-        match p.conn.client.sign_in(token, code).await {
-            Ok(user) => {
+        let Some(info) = p.info.clone() else { bail!("code was already used") };
+        match login::sign_in(&p.conn.client, &p.session, &info, code).await? {
+            SignIn::Done(user) => {
                 let label = user.full_name();
                 drop(g);
                 self.finish_login(label.clone()).await?;
                 Ok(CodeResult::LoggedIn(label))
             }
-            Err(SignInError::PasswordRequired(pt)) => {
+            SignIn::Password(pt) => {
                 let hint = pt.hint().map(str::to_string);
                 p.password = Some(pt);
-                p.token = None;
+                p.info = None;
                 Ok(CodeResult::PasswordRequired(hint))
             }
-            Err(SignInError::InvalidCode) => Ok(CodeResult::InvalidCode),
-            Err(e) => bail!("{e}"),
+            SignIn::InvalidCode => Ok(CodeResult::InvalidCode),
+            SignIn::SignUpRequired => bail!("для цього номера немає акаунта Telegram — спершу зареєструйся в офіційному застосунку"),
         }
     }
 
