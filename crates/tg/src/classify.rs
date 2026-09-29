@@ -55,7 +55,9 @@ pub async fn run(ctx: &Arc<Ctx>, max: i64) -> Result<Option<(usize, usize)>> {
         return Ok(Some((0, 0)));
     }
     let (mut done, mut news_total) = (0, 0);
-    for batch in rows.chunks(40) {
+    // Work list of batches; a failing batch is halved so one bad name cannot sink 40 others.
+    let mut queue: Vec<(Vec<_>, u8)> = rows.chunks(30).map(|c| (c.to_vec(), 0)).collect();
+    while let Some((batch, tries)) = queue.pop() {
         let asked: Vec<i64> = batch.iter().map(|r| r.0).collect();
         let listing: String = batch
             .iter()
@@ -66,17 +68,36 @@ pub async fn run(ctx: &Arc<Ctx>, max: i64) -> Result<Option<(usize, usize)>> {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let raw = match llm.chat("classify", &[ChatMessage::system(SYSTEM), ChatMessage::user(listing)], false).await {
-            Ok(r) => r,
+        let items = match llm.chat("classify", &[ChatMessage::system(SYSTEM), ChatMessage::user(listing)], false).await {
+            Ok(raw) => parse_answer(&raw, &asked),
             Err(e) => {
-                tracing::warn!("classify batch failed: {e:#}");
-                continue;
+                let msg = e.to_string();
+                tracing::warn!("classify batch of {} failed: {}", batch.len(), msg.chars().take(120).collect::<String>().replace('\n', " "));
+                if msg.contains(tgh_core::llm::DAILY_QUOTA) {
+                    tracing::warn!("classification paused: LLM daily quota spent (run /classify tomorrow)");
+                    break;
+                }
+                if (msg.contains("429") || msg.contains("HTTP 5")) && tries < 4 {
+                    // Rate limit / overload says nothing about the batch itself: wait and retry it whole.
+                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                    queue.push((batch, tries + 1));
+                    continue;
+                }
+                Vec::new()
             }
         };
-        let items = parse_answer(&raw, &asked);
+        if items.is_empty() && batch.len() > 1 {
+            // Empty/blocked answer: bisect so one bad name cannot sink the rest.
+            let (a, b) = batch.split_at(batch.len() / 2);
+            queue.push((a.to_vec(), 0));
+            queue.push((b.to_vec(), 0));
+            continue;
+        }
+        // A single item the model refuses even alone: park it as "other" so it is not retried forever.
+        let items = if items.is_empty() { vec![(batch[0].0, "other".to_string(), false)] } else { items };
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await; // stay under per-minute quotas
         news_total += items.iter().filter(|i| i.2).count();
-        let n = ctx.db.call(move |c| repo::apply_classification(c, uid, &items)).await?;
-        done += n;
+        done += ctx.db.call(move |c| repo::apply_classification(c, uid, &items)).await?;
     }
     Ok(Some((done, news_total)))
 }

@@ -40,12 +40,13 @@ impl Provider {
     pub fn name(self) -> &'static str {
         match self { Self::OpenAi => "openai", Self::Gemini => "gemini" }
     }
-    fn chat_model(self, heavy: bool) -> &'static str {
+    /// Models to try in order. Free-tier quotas are per model, so a spent daily quota falls through to the next.
+    fn chat_models(self, heavy: bool) -> Vec<&'static str> {
         match (self, heavy) {
-            (Self::OpenAi, false) => m::OPENAI_CHAT_LIGHT,
-            (Self::OpenAi, true) => m::OPENAI_CHAT_HEAVY,
-            (Self::Gemini, false) => m::GEMINI_CHAT_LIGHT,
-            (Self::Gemini, true) => m::GEMINI_CHAT_HEAVY,
+            (Self::OpenAi, false) => vec![m::OPENAI_CHAT_LIGHT],
+            (Self::OpenAi, true) => vec![m::OPENAI_CHAT_HEAVY],
+            (Self::Gemini, false) => vec![m::GEMINI_CHAT_LIGHT, m::GEMINI_CHAT_FALLBACK, "gemini-3.1-flash-lite"],
+            (Self::Gemini, true) => vec![m::GEMINI_CHAT_HEAVY, m::GEMINI_CHAT_LIGHT, m::GEMINI_CHAT_FALLBACK],
         }
     }
     fn embed_model(self) -> &'static str {
@@ -88,12 +89,22 @@ impl LlmClient {
 
     /// One chat completion; `purpose` labels the call in analytics ("agent", "summary", ...).
     pub async fn chat(&self, purpose: &str, messages: &[ChatMessage], heavy: bool) -> Result<String> {
-        let model = self.provider.chat_model(heavy);
-        let started = Instant::now();
-        let res = self.chat_inner(model, messages).await;
-        let (p, c, ok) = res.as_ref().map(|r| (r.prompt_tokens, r.completion_tokens, true)).unwrap_or((0, 0, false));
-        self.record(purpose, model, p, c, started.elapsed(), ok).await;
-        Ok(res?.text)
+        let mut last = None;
+        for model in self.provider.chat_models(heavy) {
+            let started = Instant::now();
+            let res = self.chat_inner(model, messages).await;
+            let (p, c, ok) = res.as_ref().map(|r| (r.prompt_tokens, r.completion_tokens, true)).unwrap_or((0, 0, false));
+            self.record(purpose, model, p, c, started.elapsed(), ok).await;
+            match res {
+                Ok(r) => return Ok(r.text),
+                Err(e) if e.to_string().contains(DAILY_QUOTA) => {
+                    tracing::warn!("{model}: daily quota spent, trying the next model");
+                    last = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no model configured")))
     }
 
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -106,7 +117,7 @@ impl LlmClient {
 
     /// Cheap key check used when the owner saves a key.
     pub async fn validate(&self) -> bool {
-        self.chat_inner(self.provider.chat_model(false), &[ChatMessage::user("ping")]).await.is_ok()
+        self.chat_inner(self.provider.chat_models(false)[0], &[ChatMessage::user("ping")]).await.is_ok()
     }
 
     async fn record(&self, purpose: &str, model: &str, p: i64, c: i64, took: Duration, ok: bool) {
@@ -160,6 +171,9 @@ impl LlmClient {
     }
 }
 
+/// Marker in the error text for a spent *daily* quota (retrying today is pointless; another model may still work).
+pub const DAILY_QUOTA: &str = "daily quota exhausted";
+
 /// Transient provider errors worth retrying (rate limit / overload).
 fn is_transient(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504)
@@ -193,6 +207,9 @@ async fn send_once(req: reqwest::RequestBuilder) -> std::result::Result<Value, S
     let body = resp.text().await.map_err(|e| SendErr::Transient(anyhow::anyhow!("LLM response unreadable: {e}")))?;
     if !status.is_success() {
         // Provider error bodies can echo request data; keep only a short prefix.
+        if status.as_u16() == 429 && body.contains("PerDay") {
+            return Err(SendErr::Fatal(anyhow::anyhow!("LLM {DAILY_QUOTA} (provider quota per day)")));
+        }
         let e = anyhow::anyhow!("LLM HTTP {status}: {}", body.chars().take(200).collect::<String>());
         return Err(if is_transient(status) { SendErr::Transient(e) } else { SendErr::Fatal(e) });
     }
@@ -227,7 +244,13 @@ pub fn parse_openai_chat(v: &Value) -> Result<Completion> {
 }
 
 pub fn parse_gemini_chat(v: &Value) -> Result<Completion> {
-    let parts = v.pointer("/candidates/0/content/parts").and_then(Value::as_array).context("no candidates[0].content.parts")?;
+    let Some(parts) = v.pointer("/candidates/0/content/parts").and_then(Value::as_array) else {
+        // Blocked or cut off: say why instead of a bare "missing field".
+        let reason = v.pointer("/candidates/0/finishReason").and_then(Value::as_str)
+            .or_else(|| v.pointer("/promptFeedback/blockReason").and_then(Value::as_str))
+            .unwrap_or("unknown");
+        anyhow::bail!("Gemini returned no content (reason: {reason})");
+    };
     let text: String = parts.iter().filter_map(|p| p.get("text").and_then(Value::as_str)).collect();
     Ok(Completion {
         text,
@@ -247,6 +270,8 @@ mod tests {
         let c = parse_openai_chat(&json!({"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}})).unwrap();
         assert_eq!(c, Completion { text: "hi".into(), prompt_tokens: 7, completion_tokens: 2 });
         assert!(parse_openai_chat(&json!({"error":"x"})).is_err());
+        let blocked = parse_gemini_chat(&json!({"candidates":[{"finishReason":"SAFETY"}]})).unwrap_err().to_string();
+        assert!(blocked.contains("SAFETY"), "{blocked}");
     }
 
     #[test]

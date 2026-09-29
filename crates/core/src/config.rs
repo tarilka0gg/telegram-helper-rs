@@ -8,6 +8,7 @@ pub mod llm_defaults {
     pub const OPENAI_CHAT_HEAVY: &str = "gpt-5.5";
     pub const OPENAI_EMBED: &str = "text-embedding-3-small";
     pub const GEMINI_CHAT_LIGHT: &str = "gemini-3.5-flash";
+    pub const GEMINI_CHAT_FALLBACK: &str = "gemini-3.5-flash-lite";
     pub const GEMINI_CHAT_HEAVY: &str = "gemini-pro-latest";
     pub const GEMINI_EMBED: &str = "text-embedding-004";
 }
