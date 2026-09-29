@@ -264,6 +264,7 @@ pub fn waiting_for_reply(c: &Connection, user_id: i64, since: &str, limit: i64) 
          FROM messages m LEFT JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id
          WHERE m.user_id = ?1 AND m.is_outgoing = 0 AND m.date >= ?2
            AND m.date = (SELECT max(date) FROM messages x WHERE x.user_id = m.user_id AND x.peer_id = m.peer_id AND x.is_outgoing = 0)
+           AND COALESCE(k.peer_kind, 'user') = 'user'
            AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.user_id = m.user_id AND o.peer_id = m.peer_id AND o.is_outgoing = 1 AND o.date > m.date)
          GROUP BY m.peer_id ORDER BY m.date DESC LIMIT ?3",
     )?;
@@ -577,6 +578,10 @@ mod tests {
         save_message(&c, u, &MessageRow { message_id: 3, is_outgoing: false, date: "2026-01-01 10:05:00".into(), text: Some("ти де?".into()), ..m(3, "") }).unwrap();
         let w = waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap();
         assert_eq!((w.len(), w[0].2.as_str()), (1, "ти де?"));
+        // a channel post must not count as "waiting for your reply"
+        upsert_contact(&c, u, &ContactRow { peer_id: 77, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Chan".into(), username: None }).unwrap();
+        save_message(&c, u, &MessageRow { peer_id: 77, ..m(9, "post") }).unwrap();
+        assert_eq!(waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap().len(), 1);
         assert_eq!(search_messages(&c, u, "молоко", 10).unwrap().len(), 1);
         assert!(search_messages(&c, u, "\" OR 1", 10).is_ok()); // hostile input must not break FTS syntax
     }

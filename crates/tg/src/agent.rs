@@ -24,7 +24,7 @@ struct SendPayload {
 
 pub fn peer_ref_of(kind: &str, id: i64) -> Option<PeerRef> {
     let pid = match kind {
-        "channel" => PeerId::channel(id),
+        "channel" | "supergroup" => PeerId::channel(id),
         "chat" => PeerId::chat(id),
         _ => PeerId::user(id),
     }?;

@@ -44,6 +44,8 @@ where
 pub fn peer_kind(p: &Peer) -> &'static str {
     match p {
         Peer::User(_) => "user",
+        // Megagroups live in the channel id space; keep them apart from small group chats.
+        Peer::Group(g) if g.is_megagroup() => "supergroup",
         Peer::Group(_) => "chat",
         Peer::Channel(_) => "channel",
     }

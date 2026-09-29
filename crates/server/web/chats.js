@@ -1,13 +1,13 @@
 (async function () {
   const $ = id => document.getElementById(id);
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const ICON = { channel: '📢', chat: '👥', user: '👤' };
+  const ICON = { channel: '📢', chat: '👥', supergroup: '👥', user: '👤' };
   let contacts = [], tab = 'all', search = '', flash = null;
 
   try { contacts = (await (await fetch('/api/contacts')).json()).filter(c => !c.is_bot); } catch (_) { $('count').textContent = 'cannot load contacts'; }
 
   const TABS = [
-    ['all', 'all', () => true], ['channels', 'channels', c => c.kind === 'channel'], ['groups', 'groups', c => c.kind === 'chat'],
+    ['all', 'all', () => true], ['channels', 'channels', c => c.kind === 'channel'], ['groups', 'groups', c => c.kind === 'chat' || c.kind === 'supergroup'],
     ['people', 'people', c => c.kind === 'user'], ['news', '📰 news sources', c => c.is_news_source], ['off', '🚫 not mirrored', c => !c.mirror],
   ];
   const cats = [...new Set(contacts.map(c => c.category).filter(Boolean))].sort();
@@ -25,7 +25,7 @@
     $('count').textContent = flash || `${rows.length} of ${contacts.length} shown`;
     $('list').innerHTML = rows.slice(0, 500).map(c => {
       const id = Number(c.peer_id);
-      const news = c.kind === 'channel'
+      const news = c.kind !== 'user'
         ? `<label class="chk"><input type="checkbox" data-id="${id}" data-field="news_source" ${c.is_news_source ? 'checked' : ''}> 📰 news</label>`
         : '<span class="chk off">—</span>';
       return `<div class="row${c.is_archived ? ' arch' : ''}">
