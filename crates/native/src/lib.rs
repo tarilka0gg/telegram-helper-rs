@@ -168,6 +168,8 @@ mod tests {
         assert!(fuzzy_score("Starfield", "Starfield | Школярі") >= 90);
         assert!(fuzzy_score("іванов контакт", "Контакт Номер 5 Іванов") >= 90); // word subset, any order
         assert!(fuzzy_score("Starfield Школярі", "Starfield | Школярі") >= 90);
+        assert!(fuzzy_score("Оля", "Starfield | Школярі") < 75, "substring inside a word must not match");
+        assert!(fuzzy_score("Оля", "Мама і Оля") >= 90);
         assert!(fuzzy_score("mama", "Максим") < 60);
         assert!(fuzzy_score("Андрій", "Максим") < 60);
     }

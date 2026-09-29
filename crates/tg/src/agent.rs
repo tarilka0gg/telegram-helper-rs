@@ -253,6 +253,15 @@ impl Bot {
     /// `/news [topic]`: fetch, dedupe, digest. Marks posts as sent only after delivery succeeded.
     pub(crate) async fn news_digest(&self, topic: &str, _hours: i64, peer: PeerRef) -> Result<()> {
         let topic = Some(topic.trim()).filter(|t| !t.is_empty());
+        // "what's new in Starfield": a topic that is really a channel/chat name (typos tolerated) means
+        // "summarize that chat", not "grep post texts for this word".
+        if let Some(t) = topic {
+            let uid = self.ctx.user_id;
+            let all = self.ctx.db.call(move |c| repo::list_contacts(c, uid)).await?;
+            if features::topic_names_a_chat(&all, t) {
+                return self.chat_pick(t, "summary", peer).await;
+            }
+        }
         match crate::news::build(&self.ctx, &self.mgr, topic).await? {
             crate::news::News::Nothing(why) => self.say(peer, &esc(&why)).await,
             crate::news::News::Digest(pack) => {

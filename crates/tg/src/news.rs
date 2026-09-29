@@ -17,8 +17,8 @@ use tgh_core::{
 
 use crate::{ctx::Ctx, manager::Manager, userbot};
 
-const SYSTEM: &str = "Ты делаешь дайджест новостей из подписанных каналов. Сгруппируй по смыслу, убери дубли, \
-3–7 пунктов, HTML (<b>, <i>). В конце — названия каналов-источников. Ничего не выдумывай сверх текста постов.";
+const SYSTEM: &str = "Ти робиш дайджест новин із підписаних каналів. Згрупуй за змістом, прибери дублі, \
+3–7 пунктів, HTML (<b>, <i>). Наприкінці — назви каналів-джерел. Нічого не вигадуй понад текст постів.";
 
 pub struct NewsPack {
     pub html: String,
@@ -84,7 +84,7 @@ pub async fn build_with(ctx: &Arc<Ctx>, mgr: &Manager, topic: Option<&str>, llm:
     let note = if fallback { "За добу нових постів немає — нижче останній наявний пост кожного каналу.\n\n" } else { "" };
     let body: String = posts.iter().map(format_post).collect::<Vec<_>>().join("\n\n");
     let head = topic.map(|t| format!("Тема: {t}\n\n")).unwrap_or_default();
-    let raw = llm.chat("news", &[ChatMessage::system(SYSTEM), ChatMessage::user(format!("{head}{note}{body}"))], heavy).await?;
+    let raw = llm.chat("news", &[ChatMessage::system(format!("{SYSTEM}{}", crate::features::UK)), ChatMessage::user(format!("{head}{note}{body}"))], heavy).await?;
     let html = sanitize_html(&raw);
     let html = if fallback { format!("<i>За добу нових постів немає — показую останні наявні.</i>\n\n{html}") } else { html };
     Ok(News::Digest(NewsPack { html, posts: posts.iter().map(|p| (p.peer_id, p.message_id)).collect() }))

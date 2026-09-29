@@ -14,37 +14,41 @@ use tgh_core::{
 
 use crate::ctx::Ctx;
 
-const SUMMARY_SYSTEM: &str = "Ты делаешь сжатое саммари переписки. Структура ответа:\n\
-📝 <b>Главное</b> — 2–4 буллета.\n\
-🎯 <b>Открытые вопросы / задачи</b> — что от меня ждут.\n\
-📅 <b>Договорённости</b> — даты, встречи, обещания (с датой если есть).\n\
-🌡 <b>Тон</b> — одной фразой.\n\
-Используй HTML-разметку (<b>, <i>, <code>). Без markdown.";
+/// Appended to every prompt whose output the owner reads: always Ukrainian, whatever language the sources use.
+pub const UK: &str = "\n\nМова відповіді: УКРАЇНСЬКА. Навіть якщо повідомлення чи пости написані російською або іншою мовою, висновок пиши українською; власні назви, цитати й терміни залишай як є.";
 
-const DRAFT_SYSTEM: &str = "Ты пишешь черновик ответа от моего имени. Только текст ответа, без префиксов и пояснений.\n\
-Учитывай контекст последних сообщений и не повторяй уже сказанное.\n\
-Если важная информация неоднозначна — задай короткий уточняющий вопрос вместо домысла.";
+const SUMMARY_SYSTEM: &str = "Ти робиш стисле саміарі переписки. Структура відповіді:\n\
+📝 <b>Головне</b> — 2–4 пункти.\n\
+🎯 <b>Відкриті питання / задачі</b> — чого від мене чекають.\n\
+📅 <b>Домовленості</b> — дати, зустрічі, обіцянки (з датою, якщо є).\n\
+🌡 <b>Тон</b> — одним реченням.\n\
+Використовуй HTML-розмітку (<b>, <i>, <code>). Без markdown.";
 
-const CATCHUP_SYSTEM: &str = "Я давно не отвечал в этом чате. Сделай:\n\
-1) <b>Где мы остановились</b> — 2–3 буллета о текущем состоянии.\n\
-2) <b>Чего от меня ждут</b> — что нужно ответить или сделать.\n\
-3) <b>Черновик ответа</b> — 1–4 предложения, в моём стиле.\n\
-Используй HTML-разметку.";
+const DRAFT_SYSTEM: &str = "Ти пишеш чернетку відповіді від мого імені. Лише текст відповіді, без префіксів і пояснень.\n\
+Враховуй контекст останніх повідомлень і не повторюй уже сказане.\n\
+Пиши тією мовою, якою пише співрозмовник (якщо незрозуміло — українською).\n\
+Якщо важлива інформація неоднозначна — став коротке уточнююче запитання замість домислів.";
 
-const COMMITMENTS_SYSTEM: &str = "Ты выделяешь явные обязательства из переписки. Обязательство — конкретное обещание \
-что-то сделать, прислать, ответить, прийти. Игнорируй риторические фразы.\n\n\
-Возвращай JSON-массив (только массив, без обёрток):\n\
-[\n  {\"direction\": \"mine\" | \"theirs\",\n   \"message_id\": <int или null>,\n   \"text\": \"обещание одной фразой\",\n   \"deadline\": \"ISO-8601 datetime UTC или null\"}\n]\n\
-Если обязательств нет — пустой массив [].\n\
-Не выдумывай дедлайны, если их нет в тексте.";
+const CATCHUP_SYSTEM: &str = "Я давно не відповідав у цьому чаті. Зроби:\n\
+1) <b>Де ми зупинились</b> — 2–3 пункти про поточний стан.\n\
+2) <b>Чого від мене чекають</b> — що треба відповісти чи зробити.\n\
+3) <b>Чернетка відповіді</b> — 1–4 речення, у моєму стилі, мовою співрозмовника.\n\
+Використовуй HTML-розмітку.";
 
-const DIGEST_SYSTEM: &str = "Ты делаешь короткий утренний дайджест по моей Telegram-активности.\n\
-Структура (HTML):\n☀ <b>Доброе утро!</b>\n\n\
-📨 <b>Ждут ответа</b> (если есть): кто и про что (1 строка на собеседника).\n\
-🔥 <b>Мои горящие обещания</b>: те, что просрочены или ближайшие 24ч.\n\
-💼 <b>Обещания мне</b>: что просрочено или скоро.\n\
-🤖 <b>Авто-ответы</b>: сколько и кому, без подробностей.\n\
-Если в каком-то блоке пусто — пропускай блок целиком.";
+const COMMITMENTS_SYSTEM: &str = "Ти виділяєш явні зобов'язання з переписки. Зобов'язання — конкретна обіцянка \
+щось зробити, надіслати, відповісти, прийти. Ігноруй риторичні фрази.\n\n\
+Повертай JSON-масив (лише масив, без обгорток):\n\
+[\n  {\"direction\": \"mine\" | \"theirs\",\n   \"message_id\": <int або null>,\n   \"text\": \"обіцянка одним реченням українською\",\n   \"deadline\": \"ISO-8601 datetime UTC або null\"}\n]\n\
+Якщо зобов'язань немає — порожній масив [].\n\
+Не вигадуй дедлайнів, якщо їх немає в тексті.";
+
+const DIGEST_SYSTEM: &str = "Ти робиш короткий ранковий дайджест моєї Telegram-активності.\n\
+Структура (HTML):\n☀ <b>Доброго ранку!</b>\n\n\
+📨 <b>Чекають відповіді</b> (якщо є): хто і про що (1 рядок на співрозмовника).\n\
+🔥 <b>Мої гарячі обіцянки</b>: ті, що прострочені або найближчі 24 год.\n\
+💼 <b>Обіцянки мені</b>: що прострочено або скоро.\n\
+🤖 <b>Авто-відповіді</b>: скільки і кому, без подробиць.\n\
+Якщо в якомусь блоці порожньо — пропусти блок повністю.";
 
 pub fn message_to_text(m: &MessageRow) -> String {
     let body = m.text.clone().unwrap_or_else(|| format!("[{}]", m.kind));
@@ -66,7 +70,7 @@ async fn ask(llm: &LlmClient, purpose: &str, system: &str, user: String, heavy: 
 }
 
 pub async fn summarize(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow]) -> Result<String> {
-    ask(llm, "summary", SUMMARY_SYSTEM, format!("Собеседник: {name}\n\nПереписка (последние {} сообщений):\n{}", msgs.len(), transcript(msgs)), heavy).await
+    ask(llm, "summary", &format!("{SUMMARY_SYSTEM}{UK}"), format!("Собеседник: {name}\n\nПереписка (последние {} сообщений):\n{}", msgs.len(), transcript(msgs)), heavy).await
 }
 
 pub async fn draft_reply(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow], instruction: Option<&str>) -> Result<String> {
@@ -75,7 +79,7 @@ pub async fn draft_reply(llm: &LlmClient, heavy: bool, name: &str, msgs: &[Messa
 }
 
 pub async fn catchup(llm: &LlmClient, heavy: bool, name: &str, msgs: &[MessageRow]) -> Result<String> {
-    ask(llm, "catchup", CATCHUP_SYSTEM, format!("Собеседник: {name}\n\nПоследние сообщения:\n{}", transcript(msgs)), heavy).await
+    ask(llm, "catchup", &format!("{CATCHUP_SYSTEM}{UK}"), format!("Собеседник: {name}\n\nПоследние сообщения:\n{}", transcript(msgs)), heavy).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,7 +122,7 @@ pub async fn extract_commitments(ctx: &Arc<Ctx>, llm: &LlmClient, peer_id: i64, 
         return Ok(vec![]);
     }
     let prompt = format!("Собеседник: {name}.\nПереписка:\n\n{}\n\nВыдели обязательства.", transcript(msgs));
-    let raw = llm.chat("commitments", &[ChatMessage::system(COMMITMENTS_SYSTEM), ChatMessage::user(prompt)], false).await?;
+    let raw = llm.chat("commitments", &[ChatMessage::system(format!("{COMMITMENTS_SYSTEM}{UK}")), ChatMessage::user(prompt)], false).await?;
     let items = parse_commitments(&raw);
     let (uid, name, saved) = (ctx.user_id, name.to_string(), items.clone());
     ctx.db
@@ -150,6 +154,12 @@ pub fn rank_contacts(contacts: &[ContactRow], query: &str) -> Vec<(ContactRow, u
     out
 }
 
+/// Does `topic` name a channel/group/chat (typos tolerated) rather than a subject? People do not count:
+/// "what's new about Olya" is not a news query. Threshold is deliberately high (75).
+pub fn topic_names_a_chat(contacts: &[ContactRow], topic: &str) -> bool {
+    rank_contacts(contacts, topic).into_iter().any(|(k, score)| k.peer_kind != "user" && score >= 75)
+}
+
 pub async fn find_contacts(ctx: &Ctx, query: &str) -> Result<Vec<(ContactRow, u32)>> {
     let uid = ctx.user_id;
     let all = ctx.db.call(move |c| repo::list_contacts(c, uid)).await?;
@@ -158,7 +168,7 @@ pub async fn find_contacts(ctx: &Ctx, query: &str) -> Result<Vec<(ContactRow, u3
 
 pub async fn build_digest(ctx: &Ctx) -> Result<String> {
     let Some(llm) = ctx.llm().await? else {
-        return Ok("Не задан LLM-ключ — не могу собрать дайджест. Открой /settings.".into());
+        return Ok("Немає LLM-ключа — не можу зібрати дайджест. Додай ключ: /key.".into());
     };
     build_digest_with(ctx, &llm).await
 }
@@ -186,30 +196,30 @@ pub async fn build_digest_with(ctx: &Ctx, llm: &LlmClient) -> Result<String> {
                 None => repo::parse_ts(&c.created_at).is_some_and(|t| now - t.and_utc() > Duration::days(2)),
             })
             .take(20)
-            .map(|c| format!("- {}: {} (до {})", c.peer_name, c.text, c.deadline_at.as_deref().unwrap_or("без срока")))
+            .map(|c| format!("- {}: {} (до {})", c.peer_name, c.text, c.deadline_at.as_deref().unwrap_or("без строку")))
             .collect()
     };
     let mut parts = Vec::new();
     if !waiting.is_empty() {
-        parts.push(format!("Ждут ответа:\n{}", waiting.iter().map(|(_, n, t)| format!("- {n}: {t}")).collect::<Vec<_>>().join("\n")));
+        parts.push(format!("Чекають відповіді:\n{}", waiting.iter().map(|(_, n, t)| format!("- {n}: {t}")).collect::<Vec<_>>().join("\n")));
     }
     let (mh, th) = (hot(mine), hot(theirs));
     if !mh.is_empty() {
-        parts.push(format!("Мои горящие обещания:\n{}", mh.join("\n")));
+        parts.push(format!("Мої гарячі обіцянки:\n{}", mh.join("\n")));
     }
     if !th.is_empty() {
-        parts.push(format!("Обещания мне (горящие):\n{}", th.join("\n")));
+        parts.push(format!("Обіцянки мені (гарячі):\n{}", th.join("\n")));
     }
     if !autos.is_empty() {
         let mut who = autos.clone();
         who.sort();
         who.dedup();
-        parts.push(format!("Авто-ответов: {} (кому: {})", autos.len(), who.join(", ")));
+        parts.push(format!("Авто-відповідей: {} (кому: {})", autos.len(), who.join(", ")));
     }
     if parts.is_empty() {
-        return Ok("☀ Доброе утро! За ночь — тишина.".into());
+        return Ok("☀ Доброго ранку! За ніч — тиша.".into());
     }
-    ask(llm, "digest", DIGEST_SYSTEM, parts.join("\n\n"), s.use_heavy_model).await
+    ask(llm, "digest", &format!("{DIGEST_SYSTEM}{UK}"), parts.join("\n\n"), s.use_heavy_model).await
 }
 
 #[cfg(test)]
@@ -238,6 +248,18 @@ mod tests {
         assert_eq!(rank_contacts(&cs, "Оля")[0].0.peer_id, 2);
         assert_eq!(rank_contacts(&cs, "@oleks")[0].0.peer_id, 1);
         assert!(rank_contacts(&cs, "Зіновій").is_empty());
+    }
+
+    #[test]
+    fn topic_that_names_a_channel_is_recognised_even_with_typos() {
+        let mk = |id: i64, name: &str, kind: &str| ContactRow { peer_id: id, peer_kind: kind.into(), is_bot: false, is_archived: false, display_name: name.into(), username: None };
+        let cs = vec![mk(1, "Starfield | Школярі", "supergroup"), mk(2, "Бізнес-інкубатор Starfield", "channel"), mk(3, "Оля Іванова", "user"), mk(4, "Світло Місто / Область", "channel")];
+        for yes in ["starfeild", "Starfield", "starfield школярі", "свiтло місто", "Бізнес інкубатор"] {
+            assert!(topic_names_a_chat(&cs, yes), "{yes}");
+        }
+        for no in ["штучний інтелект", "ціни на нафту", "Оля", "Оля Іванова", "", "війна"] {
+            assert!(!topic_names_a_chat(&cs, no), "{no}");
+        }
     }
 
     #[test]
@@ -313,10 +335,10 @@ mod tests {
         let base = fake_llm(|req| reply(&user_text(&req))).await;
         let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
         let out = build_digest_with(&ctx, &llm).await.unwrap();
-        assert!(out.contains("Ждут ответа") && out.contains("ти завтра будеш?"), "{out}");
+        assert!(out.contains("Чекають відповіді") && out.contains("ти завтра будеш?"), "{out}");
         assert!(!out.contains("новий пост каналу"), "channel post leaked into 'waiting': {out}");
         assert!(out.contains("надіслати договір") && !out.contains("далека справа"), "{out}");
-        assert!(out.contains("Авто-ответов: 1"), "{out}");
+        assert!(out.contains("Авто-відповідей: 1"), "{out}");
     }
 
     #[tokio::test]
@@ -327,7 +349,7 @@ mod tests {
         let c2 = calls.clone();
         let base = fake_llm(move |_| { c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst); (500, serde_json::json!({})) }).await;
         let llm = LlmClient::with_base(tgh_core::llm::Provider::Groq, "k".into(), ctx.db.clone(), &base);
-        assert!(build_digest_with(&ctx, &llm).await.unwrap().contains("тишина"));
+        assert!(build_digest_with(&ctx, &llm).await.unwrap().contains("тиша"));
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

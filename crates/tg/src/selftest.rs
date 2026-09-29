@@ -153,7 +153,15 @@ pub async fn run(mgr: &Arc<Manager>) -> Vec<Check> {
 
     out.push(check("news digest build (not sent, not marked)", async {
         match crate::news::build(&ctx, mgr, None).await? {
-            crate::news::News::Digest(p) => Ok(format!("digest built from {} post(s), {} chars", p.posts.len(), p.html.chars().count())),
+            crate::news::News::Digest(p) => {
+                // Owner-facing text must be Ukrainian: Russian-only letters (ы э ъ) must not outnumber Ukrainian ones (і ї є ґ).
+                let count = |set: &str| p.html.chars().filter(|c| set.contains(*c)).count();
+                let (uk, ru) = (count("іїєґІЇЄҐ"), count("ыэъЫЭЪ"));
+                if ru > uk {
+                    bail!("digest looks Russian (uk letters {uk}, ru letters {ru})");
+                }
+                Ok(format!("digest built from {} post(s), {} chars, language ok (uk {uk} / ru {ru})", p.posts.len(), p.html.chars().count()))
+            }
             crate::news::News::Nothing(why) => Ok(format!("nothing to send: {why}")),
         }
     }).await);

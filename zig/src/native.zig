@@ -147,12 +147,18 @@ fn ratio(a: []const u32, b: []const u32) u32 {
     return @intCast((200 * lcsLen(a, b)) / total);
 }
 
+/// A partial match must start at a word boundary: "оля" is not a match inside "Школярі".
+fn isSeparator(cp: u32) bool {
+    return cp < 128 and !((cp >= '0' and cp <= '9') or (cp >= 'a' and cp <= 'z'));
+}
+
 fn partialRatio(a: []const u32, b: []const u32) u32 {
     const short = if (a.len <= b.len) a else b;
     const long = if (a.len <= b.len) b else a;
     if (short.len == 0) return if (long.len == 0) 100 else 0;
     var best: u32 = 0;
     for (0..long.len - short.len + 1) |s| {
+        if (s > 0 and !isSeparator(long[s - 1])) continue;
         best = @max(best, ratio(short, long[s .. s + short.len]));
     }
     return best;
@@ -356,6 +362,10 @@ test "fuzzy" {
     try std.testing.expect(fz("Артем", "Артём") >= 75);
     try std.testing.expect(fz("Оля", "Оля Петренко") >= 90);
     try std.testing.expect(fz("abc", "xyz") < 30);
+    // a substring inside a word is not a match ("оля" in "Школярі"), but a word start is
+    try std.testing.expect(fz("Оля", "Школярі") < 75);
+    try std.testing.expect(fz("Оля", "Starfield | Школярі") < 75);
+    try std.testing.expect(fz("Оля", "Мама і Оля") >= 90);
     // words of the query are a subset of the name's words, in any order
     try std.testing.expect(fz("іванов оля", "Оля Іванова Петрівна") >= 60);
     try std.testing.expect(fz("іванов контакт", "Контакт Номер 5 Іванов") >= 90);
