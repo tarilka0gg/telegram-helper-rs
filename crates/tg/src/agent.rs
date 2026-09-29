@@ -1,0 +1,243 @@
+//! Executes parsed intents and confirmed actions. Anything visible to other people
+//! (sending) goes through a stored pending action + inline confirmation.
+
+use anyhow::Result;
+use chrono::{Duration, Utc};
+use grammers_client::{
+    message::InputMessage,
+    session::types::{PeerId, PeerRef},
+};
+use serde::{Deserialize, Serialize};
+use tgh_core::{db::repo, intent::Intent};
+
+use crate::{
+    bot::{btn, clean, esc, Bot, Kb},
+    features,
+};
+
+#[derive(Serialize, Deserialize)]
+struct SendPayload {
+    text: String,
+    peer_id: Option<i64>,
+    name: Option<String>,
+    kind: Option<String>,
+}
+
+pub fn peer_ref_of(kind: &str, id: i64) -> Option<PeerRef> {
+    let pid = match kind {
+        "channel" => PeerId::channel(id),
+        "chat" => PeerId::chat(id),
+        _ => PeerId::user(id),
+    }?;
+    Some(pid.to_ambient_ref())
+}
+
+impl Bot {
+    pub(crate) async fn run_intent(&self, it: Intent, peer: PeerRef) -> Result<()> {
+        match it {
+            Intent::Chat { reply } => self.say(peer, &clean(&reply)).await,
+            Intent::Unknown => self.say(peer, "Не зрозумів. Спробуй переформулювати або /help.").await,
+            Intent::ListTodos => self.command_todos(peer).await,
+            Intent::SetSetting { key, value } => {
+                let r = self.apply_setting(&key, &value).await?;
+                self.say(peer, &r).await
+            }
+            Intent::Search { query } => self.command_search(&query, peer).await,
+            Intent::SendMessage { recipient, text } => self.propose_send(&recipient, &text, peer).await,
+            Intent::SummarizeChat { contact } => self.chat_pick(&contact, "summary", peer).await,
+            Intent::TasksForChat { contact } | Intent::AddRemindersFromChat { contact } => self.chat_pick(&contact, "tasks", peer).await,
+            Intent::Catchup { contact } => self.chat_pick(&contact, "catchup", peer).await,
+            Intent::DraftReply { contact, .. } => self.chat_pick(&contact, "draft", peer).await,
+            Intent::FindInChats { query, action } => self.find_in_chats(&query, action.as_deref().unwrap_or("catchup"), peer).await,
+            Intent::AddNewsTopic { topic, hours } => {
+                let (uid, t, h) = (self.ctx.user_id, topic.clone(), hours.unwrap_or(24).clamp(1, 168));
+                self.ctx.db.call(move |c| repo::add_news_topic(c, uid, &t, h)).await?;
+                self.say(peer, &format!("📰 Тему «{}» додано.", esc(&topic))).await
+            }
+            Intent::RemoveNewsTopic { topic } => {
+                let (uid, t) = (self.ctx.user_id, topic.clone());
+                let n = self.ctx.db.call(move |c| repo::remove_news_topics(c, uid, &t)).await?;
+                self.say(peer, &format!("Видалено тем: {n}")).await
+            }
+            Intent::NewsDigest { topic, hours } => self.news_digest(&topic, hours.unwrap_or(24), peer).await,
+            Intent::AddReminder { text, when, peer_query } => self.add_reminder(&text, when.as_deref(), peer_query.as_deref(), peer).await,
+            Intent::RemoveReminder { query } => {
+                let (uid, q) = (self.ctx.user_id, query.clone());
+                let gone = self.ctx.db.call(move |c| repo::cancel_commitments_matching(c, uid, &q)).await?;
+                let msg = if gone.is_empty() { "Нічого не знайшов за цим запитом.".to_string() } else { format!("Скасовано:\n{}", gone.iter().map(|t| format!("• {}", esc(t))).collect::<Vec<_>>().join("\n")) };
+                self.say(peer, &msg).await
+            }
+            Intent::Multi { actions } => {
+                for a in intent_flat(actions) {
+                    Box::pin(self.run_intent(a, peer)).await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub(crate) async fn command_todos(&self, peer: PeerRef) -> Result<()> {
+        self.command_by_name("todos", "", peer).await
+    }
+
+    pub(crate) async fn command_search(&self, q: &str, peer: PeerRef) -> Result<()> {
+        self.command_by_name("search", q, peer).await
+    }
+
+    async fn propose_send(&self, recipient: &str, text: &str, peer: PeerRef) -> Result<()> {
+        let found = features::find_contacts(&self.ctx, recipient).await?;
+        if found.is_empty() {
+            return self.say(peer, &format!("Не знайшов контакт «{}». Спробуй /sync.", esc(recipient))).await;
+        }
+        let payload = |k: Option<&repo::ContactRow>| serde_json::to_string(&SendPayload { text: text.to_string(), peer_id: k.map(|k| k.peer_id), name: k.map(|k| k.display_name.clone()), kind: k.map(|k| k.peer_kind.clone()) }).unwrap_or_default();
+        let uid = self.ctx.user_id;
+        let clear = found.len() == 1 || (found[0].1 >= 90 && found[1].1 + 10 <= found[0].1);
+        let p = payload(if clear { Some(&found[0].0) } else { None });
+        let pid = self.ctx.db.call(move |c| repo::pending_add(c, uid, "send_message", &p)).await?;
+        if clear {
+            self.ask_confirm(pid, &found[0].0.display_name, text, peer).await
+        } else {
+            let rows: Kb = found.iter().map(|(k, _)| vec![btn(k.display_name.clone(), format!("sel:{pid}:{}", k.peer_id))]).collect();
+            self.say_with(peer, "Кому саме?", Some(rows)).await
+        }
+    }
+
+    async fn ask_confirm(&self, pid: i64, name: &str, text: &str, peer: PeerRef) -> Result<()> {
+        let kb = vec![vec![btn("✅ Відправити", format!("ok:{pid}")), btn("✖ Відхилити", format!("no:{pid}"))]];
+        self.say_with(peer, &format!("Відправити <b>{}</b>:\n\n{}", esc(name), esc(text)), Some(kb)).await
+    }
+
+    pub(crate) async fn select_recipient(&self, pid: i64, peer_id: i64, peer: PeerRef) -> Result<()> {
+        let uid = self.ctx.user_id;
+        let Some((_, raw)) = self.ctx.db.call(move |c| repo::pending_get(c, uid, pid)).await? else { return self.say(peer, "Ця дія вже недійсна.").await };
+        let mut p: SendPayload = serde_json::from_str(&raw)?;
+        let contacts = self.ctx.db.call(move |c| repo::list_contacts(c, uid)).await?;
+        let Some(k) = contacts.into_iter().find(|k| k.peer_id == peer_id) else { return self.say(peer, "Контакт зник зі списку.").await };
+        (p.peer_id, p.name, p.kind) = (Some(k.peer_id), Some(k.display_name.clone()), Some(k.peer_kind));
+        let s = serde_json::to_string(&p)?;
+        self.ctx.db.call(move |c| repo::pending_set_payload(c, uid, pid, &s)).await?;
+        self.ask_confirm(pid, &k.display_name, &p.text, peer).await
+    }
+
+    pub(crate) async fn confirm_send(&self, pid: i64, peer: PeerRef) -> Result<()> {
+        let uid = self.ctx.user_id;
+        // take() makes the action single-use: a double click cannot send twice.
+        let Some((kind, raw)) = self.ctx.db.call(move |c| repo::pending_take(c, uid, pid)).await? else { return self.say(peer, "Ця дія вже виконана або застаріла.").await };
+        if kind != "send_message" {
+            return Ok(());
+        }
+        let p: SendPayload = serde_json::from_str(&raw)?;
+        let (Some(peer_id), Some(kind)) = (p.peer_id, p.kind.as_deref()) else { return self.say(peer, "Не вибрано отримувача.").await };
+        let Some(client) = self.mgr.client().await else { return self.say(peer, "Userbot не підключено — /login.").await };
+        let Some(target) = peer_ref_of(kind, peer_id) else { return self.say(peer, "Некоректний отримувач.").await };
+        match client.send_message(target, InputMessage::new().text(p.text.clone())).await {
+            Ok(_) => {
+                self.ctx.event("send", Some(peer_id), None).await;
+                self.say(peer, &format!("✅ Відправлено: <b>{}</b>", esc(p.name.as_deref().unwrap_or("?")))).await
+            }
+            Err(e) => self.say(peer, &format!("Не вдалося відправити: {}", esc(&e.to_string()))).await,
+        }
+    }
+
+    pub(crate) async fn run_chat_action(&self, action: &str, peer_id: i64, name: &str, peer: PeerRef) -> Result<()> {
+        if action == "menu" {
+            let rows: Kb = vec![
+                vec![btn("📝 Саммарі", format!("c:summary:{peer_id}")), btn("🎯 Задачі", format!("c:tasks:{peer_id}"))],
+                vec![btn("✍ Чернетка", format!("c:draft:{peer_id}")), btn("⏪ Де зупинились", format!("c:catchup:{peer_id}"))],
+            ];
+            return self.say_with(peer, &format!("Чат: <b>{}</b>", esc(name)), Some(rows)).await;
+        }
+        let Some(llm) = self.ctx.llm().await? else { return self.say(peer, "Спершу додай LLM-ключ: <code>/key openai sk-…</code>").await };
+        let msgs = features::history(&self.ctx, peer_id, 60).await?;
+        if msgs.is_empty() {
+            return self.say(peer, "У базі ще немає повідомлень цього чату (зеркало наповнюється в реальному часі).").await;
+        }
+        let heavy = self.ctx.settings().await?.use_heavy_model;
+        let out = match action {
+            "summary" => features::summarize(&llm, heavy, name, &msgs).await?,
+            "draft" => features::draft_reply(&llm, heavy, name, &msgs, None).await?,
+            "catchup" => features::catchup(&llm, heavy, name, &msgs).await?,
+            "tasks" => {
+                let saved = features::extract_commitments(&self.ctx, &llm, peer_id, name, &msgs).await?;
+                if saved.is_empty() { "Явних обіцянок не знайшов.".into() } else {
+                    format!("Збережено ({}):\n{}\n\n/todos — керувати", saved.len(), saved.iter().map(|(d, t, dl)| format!("• {} {}{}", if d == "mine" { "я →" } else { "мені:" }, esc(t), dl.as_deref().map_or(String::new(), |d| format!(" (до {d} UTC)")))).collect::<Vec<_>>().join("\n"))
+                }
+            }
+            _ => return Ok(()),
+        };
+        self.say(peer, &out).await
+    }
+
+    async fn find_in_chats(&self, query: &str, action: &str, peer: PeerRef) -> Result<()> {
+        let (uid, q) = (self.ctx.user_id, query.to_string());
+        let hits = self.ctx.db.call(move |c| repo::chats_matching(c, uid, &q, 5)).await?;
+        if hits.is_empty() {
+            return self.say(peer, "У локальній базі таких розмов немає.").await;
+        }
+        let action = match action { "summary" | "tasks" | "draft" | "catchup" => action, _ => "catchup" };
+        let rows: Kb = hits.iter().map(|(id, name, n)| vec![btn(format!("{name} ({n})"), format!("c:{action}:{id}"))]).collect();
+        self.say_with(peer, "Знайшов такі чати — обери:", Some(rows)).await
+    }
+
+    async fn add_reminder(&self, text: &str, when: Option<&str>, peer_query: Option<&str>, peer: PeerRef) -> Result<()> {
+        let deadline = when.and_then(features::parse_deadline);
+        let (peer_id, name) = match peer_query {
+            Some(q) => match features::find_contacts(&self.ctx, q).await?.first() { Some((k, _)) => (k.peer_id, k.display_name.clone()), None => (0, String::new()) },
+            None => (0, String::new()),
+        };
+        let (uid, t, d) = (self.ctx.user_id, text.to_string(), deadline.clone());
+        self.ctx.db.call(move |c| repo::add_commitment(c, uid, peer_id, &name, "mine", &t, d.as_deref())).await?;
+        let tz: chrono_tz::Tz = self.ctx.settings().await?.timezone.parse().unwrap_or(chrono_tz::UTC);
+        let when_txt = deadline.and_then(|d| chrono::NaiveDateTime::parse_from_str(&d, repo::TS_FMT).ok()).map(|d| d.and_utc().with_timezone(&tz).format("%d.%m %H:%M").to_string());
+        self.say(peer, &format!("⏰ Запам'ятав: {}{}", esc(text), when_txt.map_or(" (без дати)".into(), |w| format!(" — {w}")))).await
+    }
+
+    pub(crate) async fn news_digest(&self, topic: &str, hours: i64, peer: PeerRef) -> Result<()> {
+        let Some(llm) = self.ctx.llm().await? else { return self.say(peer, "Спершу додай LLM-ключ.").await };
+        let since = repo::fmt_ts(Utc::now() - Duration::hours(hours.clamp(1, 168)));
+        let (uid, t) = (self.ctx.user_id, topic.to_string());
+        let msgs = self.ctx.db.call(move |c| repo::news_messages(c, uid, &t, &since, 40)).await?;
+        if msgs.is_empty() {
+            return self.say(peer, "У помічених каналах нічого по цій темі (канали позначаються командою /sources).").await;
+        }
+        let body: String = msgs.iter().map(|m| format!("[{}] {}: {}", &m.date[..16.min(m.date.len())], m.sender_name.as_deref().unwrap_or("канал"), m.text.as_deref().unwrap_or("").chars().take(500).collect::<String>())).collect::<Vec<_>>().join("\n\n");
+        let sys = "Ты делаешь дайджест новостей по теме из подписанных каналов. Сгруппируй по смыслу, убери дубли, 3–7 пунктов, HTML (<b>, <i>). В конце — названия каналов-источников.";
+        let raw = llm.chat("news", &[tgh_core::llm::ChatMessage::system(sys), tgh_core::llm::ChatMessage::user(format!("Тема: {topic}\n\n{body}"))], false).await?;
+        self.say(peer, &clean(&raw)).await
+    }
+
+    pub(crate) async fn extra_command(&self, cmd: &str, arg: &str, peer: PeerRef) -> Result<()> {
+        match cmd {
+            "send" if arg.is_empty() => self.say(peer, "Формат: <code>/send скажи Олі, що дзвінок о 8</code>").await,
+            "send" => self.free_text_public(&format!("Напиши: {arg}"), peer).await,
+            "digest" => {
+                let s = self.ctx.settings().await?;
+                match arg.split_whitespace().collect::<Vec<_>>().as_slice() {
+                    ["on"] | ["off"] => { let on = arg == "on"; let r = self.apply_setting("digest_enabled", &on.into()).await?; self.say(peer, &r).await }
+                    ["at", t] => { let r = self.apply_setting("digest_time", &(*t).into()).await?; self.say(peer, &r).await }
+                    _ => { let _ = s; let d = features::build_digest(&self.ctx).await?; self.say(peer, &d).await }
+                }
+            }
+            "news" if arg.is_empty() => {
+                let uid = self.ctx.user_id;
+                let topics = self.ctx.db.call(move |c| repo::list_news_topics(c, uid)).await?;
+                let list = if topics.is_empty() { "тем немає".into() } else { topics.iter().map(|(t, h)| format!("• {} ({h} год)", esc(t))).collect::<Vec<_>>().join("\n") };
+                self.say(peer, &format!("<b>Теми новин</b>\n{list}\n\nРазово: <code>/news тема</code>. Джерела: /sources Ім'я")).await
+            }
+            "news" => self.news_digest(arg, 24, peer).await,
+            "sources" => {
+                let found = features::find_contacts(&self.ctx, arg).await?;
+                let Some((k, _)) = found.first() else { return self.say(peer, "Формат: <code>/sources Назва каналу</code> (перемикає джерело новин)").await };
+                let (uid, id) = (self.ctx.user_id, k.peer_id);
+                let cur: bool = self.ctx.db.call(move |c| c.query_row("SELECT is_news_source FROM contacts WHERE user_id = ? AND peer_id = ?", [uid, id], |r| r.get(0))).await?;
+                self.ctx.db.call(move |c| repo::set_news_source(c, uid, id, !cur)).await?;
+                self.say(peer, &format!("{} <b>{}</b> {} джерела новин", if cur { "✖" } else { "✅" }, esc(&k.display_name), if cur { "прибрано з" } else { "додано до" })).await
+            }
+            _ => self.say(peer, "Ця команда поки що недоступна.").await,
+        }
+    }
+}
+
+fn intent_flat(actions: Vec<Intent>) -> Vec<Intent> {
+    actions.into_iter().flat_map(|a| tgh_core::intent::flatten(a)).take(5).collect()
+}

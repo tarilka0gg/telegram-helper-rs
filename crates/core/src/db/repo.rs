@@ -93,6 +93,11 @@ pub fn save_session(c: &Connection, user_id: i64, api_id: i64, api_hash_enc: &st
     Ok(())
 }
 
+pub fn update_session_blob(c: &Connection, user_id: i64, session_enc: &str) -> Result<()> {
+    c.execute("UPDATE telegram_sessions SET session_string_enc = ?1 WHERE user_id = ?2", params![session_enc, user_id])?;
+    Ok(())
+}
+
 pub fn load_session(c: &Connection, user_id: i64) -> Result<Option<(i64, String, String)>> {
     c.query_row(
         "SELECT api_id, api_hash_enc, session_string_enc FROM telegram_sessions WHERE user_id = ?",
@@ -228,6 +233,165 @@ pub fn set_commitment_status(c: &Connection, user_id: i64, id: i64, status: &str
     Ok(c.execute("UPDATE commitments SET status = ?1 WHERE id = ?2 AND user_id = ?3", params![status, id, user_id])? > 0)
 }
 
+#[derive(Debug, Clone)]
+pub struct CommitmentRow {
+    pub id: i64,
+    pub peer_id: i64,
+    pub peer_name: String,
+    pub direction: String,
+    pub text: String,
+    pub deadline_at: Option<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
+pub fn open_commitments(c: &Connection, user_id: i64, direction: Option<&str>) -> Result<Vec<CommitmentRow>> {
+    let mut st = c.prepare(
+        "SELECT id, peer_id, COALESCE(peer_name, ''), direction, text, deadline_at, status, created_at FROM commitments
+         WHERE user_id = ?1 AND status IN ('open', 'reminded', 'overdue') AND (?2 IS NULL OR direction = ?2)
+         ORDER BY deadline_at IS NULL, deadline_at, id",
+    )?;
+    let rows = st.query_map(params![user_id, direction], |r| {
+        Ok(CommitmentRow { id: r.get(0)?, peer_id: r.get(1)?, peer_name: r.get(2)?, direction: r.get(3)?, text: r.get(4)?, deadline_at: r.get(5)?, status: r.get(6)?, created_at: r.get(7)? })
+    })?;
+    rows.collect()
+}
+
+/// Chats whose latest incoming message (since `since`) has no outgoing reply after it: (peer_id, name, snippet).
+pub fn waiting_for_reply(c: &Connection, user_id: i64, since: &str, limit: i64) -> Result<Vec<(i64, String, String)>> {
+    let mut st = c.prepare(
+        "SELECT m.peer_id, COALESCE(m.sender_name, k.display_name, CAST(m.peer_id AS TEXT)), substr(COALESCE(m.text, m.extracted_text, ''), 1, 200)
+         FROM messages m LEFT JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id
+         WHERE m.user_id = ?1 AND m.is_outgoing = 0 AND m.date >= ?2
+           AND m.date = (SELECT max(date) FROM messages x WHERE x.user_id = m.user_id AND x.peer_id = m.peer_id AND x.is_outgoing = 0)
+           AND NOT EXISTS (SELECT 1 FROM messages o WHERE o.user_id = m.user_id AND o.peer_id = m.peer_id AND o.is_outgoing = 1 AND o.date > m.date)
+         GROUP BY m.peer_id ORDER BY m.date DESC LIMIT ?3",
+    )?;
+    let rows = st.query_map(params![user_id, since, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+pub fn auto_replies_since(c: &Connection, user_id: i64, since: &str) -> Result<Vec<String>> {
+    let mut st = c.prepare("SELECT COALESCE(peer_name, CAST(peer_id AS TEXT)) FROM auto_reply_logs WHERE user_id = ? AND created_at >= ?")?;
+    let rows = st.query_map(params![user_id, since], |r| r.get(0))?;
+    rows.collect()
+}
+
+/// Cancels open commitments whose text or peer name contains `query` (case-insensitive). Returns the texts.
+pub fn cancel_commitments_matching(c: &Connection, user_id: i64, query: &str) -> Result<Vec<String>> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Ok(vec![]);
+    }
+    let hits: Vec<(i64, String)> = open_commitments(c, user_id, None)?
+        .into_iter()
+        .filter(|r| r.text.to_lowercase().contains(&q) || r.peer_name.to_lowercase().contains(&q))
+        .map(|r| (r.id, r.text))
+        .collect();
+    for (id, _) in &hits {
+        set_commitment_status(c, user_id, *id, "cancelled")?;
+    }
+    Ok(hits.into_iter().map(|h| h.1).collect())
+}
+
+// ---- pending actions (confirm-before-send) ---------------------------------
+
+pub fn pending_add(c: &Connection, user_id: i64, kind: &str, payload: &str) -> Result<i64> {
+    // Old unconfirmed drafts are worthless after a day.
+    c.execute("DELETE FROM pending_actions WHERE user_id = ? AND created_at < datetime('now', '-1 day')", [user_id])?;
+    c.execute("INSERT INTO pending_actions(user_id, kind, payload) VALUES (?1, ?2, ?3)", params![user_id, kind, payload])?;
+    Ok(c.last_insert_rowid())
+}
+
+pub fn pending_get(c: &Connection, user_id: i64, id: i64) -> Result<Option<(String, String)>> {
+    c.query_row("SELECT kind, payload FROM pending_actions WHERE id = ? AND user_id = ?", params![id, user_id], |r| Ok((r.get(0)?, r.get(1)?))).optional()
+}
+
+pub fn pending_set_payload(c: &Connection, user_id: i64, id: i64, payload: &str) -> Result<()> {
+    c.execute("UPDATE pending_actions SET payload = ?1 WHERE id = ?2 AND user_id = ?3", params![payload, id, user_id])?;
+    Ok(())
+}
+
+/// Atomically claims a pending action: returns it once, then it is gone (no double send on double click).
+pub fn pending_take(c: &Connection, user_id: i64, id: i64) -> Result<Option<(String, String)>> {
+    let row = pending_get(c, user_id, id)?;
+    if row.is_some() {
+        c.execute("DELETE FROM pending_actions WHERE id = ? AND user_id = ?", params![id, user_id])?;
+    }
+    Ok(row)
+}
+
+// ---- news topics & sources -------------------------------------------------
+
+pub fn add_news_topic(c: &Connection, user_id: i64, topic: &str, hours: i64) -> Result<()> {
+    c.execute("INSERT INTO news_topics(user_id, topic, hours) VALUES (?1, ?2, ?3)", params![user_id, topic, hours])?;
+    Ok(())
+}
+
+pub fn remove_news_topics(c: &Connection, user_id: i64, needle: &str) -> Result<usize> {
+    c.execute("DELETE FROM news_topics WHERE user_id = ?1 AND lower(topic) LIKE '%' || lower(?2) || '%'", params![user_id, needle])
+}
+
+pub fn list_news_topics(c: &Connection, user_id: i64) -> Result<Vec<(String, i64)>> {
+    let mut st = c.prepare("SELECT topic, hours FROM news_topics WHERE user_id = ? AND enabled = 1 ORDER BY id")?;
+    let rows = st.query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn set_news_source(c: &Connection, user_id: i64, peer_id: i64, on: bool) -> Result<()> {
+    c.execute("UPDATE contacts SET is_news_source = ?1 WHERE user_id = ?2 AND peer_id = ?3", params![on, user_id, peer_id])?;
+    Ok(())
+}
+
+/// Recent texts from channels flagged as news sources that mention `topic`.
+pub fn news_messages(c: &Connection, user_id: i64, topic: &str, since: &str, limit: i64) -> Result<Vec<MessageRow>> {
+    let mut st = c.prepare(
+        "SELECT m.peer_id, m.message_id, m.sender_id, COALESCE(k.display_name, m.sender_name), m.is_outgoing, m.date, m.kind, m.text
+         FROM messages m JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id AND k.is_news_source = 1
+         WHERE m.user_id = ?1 AND m.date >= ?2 AND m.text IS NOT NULL AND lower(m.text) LIKE '%' || lower(?3) || '%'
+         ORDER BY m.date DESC LIMIT ?4",
+    )?;
+    let rows = st.query_map(params![user_id, since, topic, limit], |r| {
+        Ok(MessageRow { peer_id: r.get(0)?, message_id: r.get(1)?, sender_id: r.get(2)?, sender_name: r.get(3)?, is_outgoing: r.get(4)?, date: r.get(5)?, kind: r.get(6)?, text: r.get(7)? })
+    })?;
+    rows.collect()
+}
+
+/// Chats that mention `query` most (global FTS), for "which chat was that?": (peer_id, name, hits).
+pub fn chats_matching(c: &Connection, user_id: i64, query: &str, limit: i64) -> Result<Vec<(i64, String, i64)>> {
+    let fts: String = query.split_whitespace().map(|w| format!("\"{}\"", w.replace('"', ""))).filter(|w| w != "\"\"").collect::<Vec<_>>().join(" OR ");
+    if fts.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut st = c.prepare(
+        "SELECT m.peer_id, COALESCE(k.display_name, CAST(m.peer_id AS TEXT)), count(*) AS n
+         FROM messages_fts f JOIN messages m ON m.id = f.rowid LEFT JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id
+         WHERE messages_fts MATCH ?1 AND m.user_id = ?2 GROUP BY m.peer_id ORDER BY n DESC LIMIT ?3",
+    )?;
+    let rows = st.query_map(params![fts, user_id, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    rows.collect()
+}
+
+/// Open "mine" commitments with a deadline, for the reminder loop: (id, peer_name, text, deadline, status).
+pub fn commitments_with_deadline(c: &Connection, user_id: i64) -> Result<Vec<(i64, String, String, String, String)>> {
+    let mut st = c.prepare(
+        "SELECT id, COALESCE(peer_name, ''), text, deadline_at, status FROM commitments
+         WHERE user_id = ? AND direction = 'mine' AND deadline_at IS NOT NULL AND status IN ('open', 'reminded')",
+    )?;
+    let rows = st.query_map([user_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?;
+    rows.collect()
+}
+
+/// True if an event of this kind was logged at or after `since` (used to fire scheduled jobs once).
+pub fn event_since(c: &Connection, kind: &str, since: &str, detail: Option<&str>) -> Result<bool> {
+    let n: i64 = c.query_row(
+        "SELECT count(*) FROM events WHERE kind = ?1 AND ts >= ?2 AND (?3 IS NULL OR detail = ?3)",
+        params![kind, since, detail],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
 // ---- auto-reply ------------------------------------------------------------
 
 pub fn last_auto_reply_at(c: &Connection, user_id: i64, peer_id: i64) -> Result<Option<String>> {
@@ -292,6 +456,11 @@ mod tests {
         save_message(&c, u, &m(1, "купи молоко")).unwrap(); // duplicate
         assert_eq!(recent_messages(&c, u, 5, 10).unwrap().len(), 2);
         assert_eq!(recent_messages(&c, u, 5, 10).unwrap()[0].message_id, 1);
+        // last incoming (id 1, 10:01) is answered by outgoing id 2 (10:02) -> nobody is waiting
+        assert!(waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap().is_empty());
+        save_message(&c, u, &MessageRow { message_id: 3, is_outgoing: false, date: "2026-01-01 10:05:00".into(), text: Some("ти де?".into()), ..m(3, "") }).unwrap();
+        let w = waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap();
+        assert_eq!((w.len(), w[0].2.as_str()), (1, "ти де?"));
         assert_eq!(search_messages(&c, u, "молоко", 10).unwrap().len(), 1);
         assert!(search_messages(&c, u, "\" OR 1", 10).is_ok()); // hostile input must not break FTS syntax
     }
@@ -309,6 +478,17 @@ mod tests {
         assert_eq!(get_api_key(&c, u, "openai").unwrap().as_deref(), Some("e2"));
         let id = add_commitment(&c, u, 5, "Оля", "mine", "send doc", None).unwrap();
         assert!(set_commitment_status(&c, u, id, "done").unwrap());
+        assert_eq!(open_commitments(&c, u, None).unwrap().len(), 0); // done is not open
+        let id2 = add_commitment(&c, u, 5, "Оля", "theirs", "pay", Some("2026-02-01 10:00:00")).unwrap();
+        assert_eq!(open_commitments(&c, u, Some("theirs")).unwrap()[0].id, id2);
+        assert!(open_commitments(&c, u, Some("mine")).unwrap().is_empty());
+        assert_eq!(cancel_commitments_matching(&c, u, "PAY").unwrap(), vec!["pay".to_string()]);
+        let pid = pending_add(&c, u, "send_message", "{}").unwrap();
+        assert!(pending_take(&c, u, pid).unwrap().is_some());
+        assert!(pending_take(&c, u, pid).unwrap().is_none()); // single use
+        add_news_topic(&c, u, "AI агенти", 24).unwrap();
+        assert_eq!(list_news_topics(&c, u).unwrap().len(), 1);
+        assert_eq!(remove_news_topics(&c, u, "ai").unwrap(), 1);
         assert!(last_auto_reply_at(&c, u, 5).unwrap().is_none());
         log_auto_reply(&c, u, 5, "Оля", "hi", "busy").unwrap();
         assert!(last_auto_reply_at(&c, u, 5).unwrap().is_some());

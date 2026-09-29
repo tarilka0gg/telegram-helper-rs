@@ -6,7 +6,7 @@ edition.workspace = true
 [dependencies]
 tgh-core = { path = "../core" }
 grammers-client.workspace = true
-grammers-session = { version = "0.10", features = ["sqlite-storage"] }
+grammers-session = { version = "0.10", default-features = false, features = ["serde"] }
 tokio.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
@@ -14,3 +14,4 @@ chrono.workspace = true
 chrono-tz.workspace = true
 serde_json.workspace = true
 tgh-native = { path = "../native" }
+serde.workspace = true

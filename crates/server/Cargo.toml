@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 tgh-core = { path = "../core" }
+tgh-tg = { path = "../tg" }
+dotenvy = "0.15"
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

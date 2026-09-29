@@ -20,4 +20,4 @@ chrono-tz = "0.10"
 fernet = "0.2"
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-grammers-client = "0.10"
+grammers-client = { version = "0.10", features = ["html"] }

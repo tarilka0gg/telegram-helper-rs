@@ -1,7 +1,7 @@
 //! The owner's own account over MTProto: mirrors every message into SQLite, answers
 //! privately while offline, and can send on the owner's behalf.
 
-use std::{path::Path, sync::{atomic::Ordering, Arc}};
+use std::sync::{atomic::Ordering, Arc};
 
 use anyhow::{Context, Result};
 use chrono::{Duration, Utc};
@@ -13,7 +13,7 @@ use grammers_client::{
     sender::SenderPoolFatHandle,
     tl, Client, SenderPool,
 };
-use grammers_session::storages::SqliteSession;
+use grammers_session::Session;
 use tgh_core::{
     db::repo::{self, ContactRow, MessageRow},
     llm::ChatMessage,
@@ -29,16 +29,16 @@ pub struct Connected {
     pub pool_task: JoinHandle<()>,
 }
 
-/// Opens (or creates) the session file and starts the network runner.
-pub async fn connect(session_path: &Path, api_id: i32) -> Result<Connected> {
-    if let Some(dir) = session_path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let session = Arc::new(SqliteSession::open(session_path).await.context("open session file")?);
+/// Starts the network runner on top of `session` (in-memory or DB-backed).
+pub fn connect<S>(session: Arc<S>, api_id: i32) -> Connected
+where
+    S: Session,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
     let SenderPool { runner, updates, handle } = SenderPool::new(session, api_id);
     let client = Client::new(handle.clone());
     let pool_task = tokio::spawn(async move { runner.run().await });
-    Ok(Connected { client, handle, updates, pool_task })
+    Connected { client, handle, updates, pool_task }
 }
 
 pub fn peer_kind(p: &Peer) -> &'static str {
