@@ -9,6 +9,21 @@ use tokio::{sync::Mutex, task::JoinHandle};
 
 use crate::{ctx::Ctx, dbsession::DbSession, login::{self, CodeInfo, SignIn}, userbot};
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum QrStatus {
+    Idle,
+    Waiting,
+    PasswordNeeded(Option<String>),
+    Done(String),
+    Failed(String),
+}
+
+/// Shared with the web UI, which renders `url` as a QR code.
+pub struct QrShared {
+    pub url: std::sync::Mutex<Option<String>>,
+    pub status: std::sync::Mutex<QrStatus>,
+}
+
 struct Pending {
     conn: userbot::Connected,
     session: Arc<DbSession>,
@@ -33,12 +48,80 @@ pub enum CodeResult {
 
 pub struct Manager {
     ctx: Arc<Ctx>,
+    qr: Arc<QrShared>,
     inner: Mutex<Inner>,
 }
 
 impl Manager {
     pub fn new(ctx: Arc<Ctx>) -> Arc<Self> {
-        Arc::new(Self { ctx, inner: Mutex::new(Inner::default()) })
+        Arc::new(Self { ctx, qr: Arc::new(QrShared { url: Default::default(), status: std::sync::Mutex::new(QrStatus::Idle) }), inner: Mutex::new(Inner::default()) })
+    }
+
+    pub fn qr(&self) -> Arc<QrShared> {
+        self.qr.clone()
+    }
+
+    fn set_qr(&self, status: QrStatus, url: Option<Option<String>>) {
+        *self.qr.status.lock().unwrap() = status;
+        if let Some(u) = url {
+            *self.qr.url.lock().unwrap() = u;
+        }
+    }
+
+    /// Starts QR login: no code needed, the owner scans the QR with an already logged-in Telegram app.
+    pub async fn begin_qr(self: &Arc<Self>) -> Result<()> {
+        let (client, session) = {
+            let mut g = self.inner.lock().await;
+            if let Some(old) = g.pending.take() {
+                old.conn.handle.quit();
+            }
+            let session = DbSession::new();
+            let conn = userbot::connect(session.clone(), self.ctx.cfg.api_id);
+            let client = conn.client.clone();
+            g.pending = Some(Pending { conn, session: session.clone(), phone: String::new(), info: None, password: None });
+            (client, session)
+        };
+        self.set_qr(QrStatus::Waiting, Some(None));
+        let this = self.clone();
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
+            while tokio::time::Instant::now() < deadline {
+                if this.inner.lock().await.pending.is_none() {
+                    return; // cancelled
+                }
+                match login::qr_poll(&client, &session, this.ctx.cfg.api_id, &this.ctx.cfg.api_hash).await {
+                    Ok(login::QrPoll::Waiting(url)) => this.set_qr(QrStatus::Waiting, Some(Some(url))),
+                    Ok(login::QrPoll::Done(user)) => {
+                        let label = user.full_name();
+                        this.set_qr(QrStatus::Waiting, Some(None));
+                        match this.finish_login(label.clone()).await {
+                            Ok(()) => this.set_qr(QrStatus::Done(label), None),
+                            Err(e) => this.set_qr(QrStatus::Failed(e.to_string()), None),
+                        }
+                        return;
+                    }
+                    Ok(login::QrPoll::Password(pt)) => {
+                        let hint = pt.hint().map(str::to_string);
+                        if let Some(p) = this.inner.lock().await.pending.as_mut() {
+                            p.password = Some(pt);
+                        }
+                        this.set_qr(QrStatus::PasswordNeeded(hint), Some(None));
+                        return;
+                    }
+                    Err(e) => {
+                        this.set_qr(QrStatus::Failed(e.to_string()), Some(None));
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            this.set_qr(QrStatus::Failed("час очікування вийшов".into()), Some(None));
+        });
+        Ok(())
+    }
+
+    pub fn qr_status(&self) -> QrStatus {
+        self.qr.status.lock().unwrap().clone()
     }
 
     pub async fn client(&self) -> Option<Client> {
@@ -170,6 +253,7 @@ impl Manager {
                 let label = user.full_name();
                 drop(g);
                 self.finish_login(label.clone()).await?;
+                self.set_qr(QrStatus::Done(label.clone()), None);
                 Ok(Some(label))
             }
             Err(SignInError::InvalidPassword(pt)) => {
@@ -193,6 +277,7 @@ impl Manager {
     }
 
     pub async fn cancel_login(&self) {
+        self.set_qr(QrStatus::Idle, Some(None));
         if let Some(p) = self.inner.lock().await.pending.take() {
             p.conn.handle.quit();
         }

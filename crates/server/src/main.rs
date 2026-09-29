@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
         let addr = std::env::var("WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
         let status = Arc::new(Status::default());
         status.userbot_connected.store(true, std::sync::atomic::Ordering::Relaxed);
-        return web::serve(&addr, web::AppState { db, status }).await;
+        return web::serve(&addr, web::AppState { db, status, mgr: None }).await;
     }
     let cfg = Config::from_env()?;
     let db = Db::open(&cfg.db_path())?;
@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
     let web_addr = cfg.web_addr.clone();
     let ctx = Ctx::new(cfg, db.clone(), status.clone()).await?;
     let mgr = Manager::new(ctx.clone());
+    let web_mgr = mgr.clone();
 
     match mgr.restore().await {
         Ok(true) => tracing::info!("userbot session restored"),
@@ -34,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Web UI in the background; the control bot keeps the process alive until Ctrl+C.
-    let web = tokio::spawn(async move { web::serve(&web_addr, web::AppState { db, status }).await });
+    let web = tokio::spawn(async move { web::serve(&web_addr, web::AppState { db, status, mgr: Some(web_mgr) }).await });
     tokio::select! {
         r = bot::run(ctx, mgr) => r?,
         r = web => r??,

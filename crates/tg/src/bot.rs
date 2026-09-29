@@ -111,6 +111,35 @@ pub(crate) fn split_message(text: &str, max: usize) -> Vec<String> {
 }
 
 impl Bot {
+    /// Reports the QR-login outcome back to the owner (and asks for the 2FA password if needed).
+    fn watch_qr(self: &Arc<Self>, peer: PeerRef) {
+        let bot = self.clone();
+        tokio::spawn(async move {
+            use crate::manager::QrStatus::*;
+            for _ in 0..110 {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                match bot.mgr.qr_status() {
+                    Waiting => continue,
+                    Done(name) => {
+                        let _ = bot.say(peer, &format!("✅ Увійшов як <b>{}</b>. Синхронізую чати…", esc(&name))).await;
+                        return;
+                    }
+                    PasswordNeeded(hint) => {
+                        *bot.conv.lock().await = Conv::Password;
+                        let hint = hint.map(|h| format!(" (підказка: {})", esc(&h))).unwrap_or_default();
+                        let _ = bot.say(peer, &format!("QR прийнято. Потрібен пароль 2FA{hint} — надішли його сюди, повідомлення я видалю.")).await;
+                        return;
+                    }
+                    Failed(e) => {
+                        let _ = bot.say(peer, &format!("QR-вхід не вдався: {}", esc(&e))).await;
+                        return;
+                    }
+                    Idle => return,
+                }
+            }
+        });
+    }
+
     pub(crate) async fn say(&self, peer: PeerRef, html: &str) -> Result<()> {
         self.say_with(peer, html, None).await
     }
@@ -143,7 +172,7 @@ impl Bot {
         sender == Some(self.ctx.cfg.owner_telegram_id)
     }
 
-    async fn on_message(&self, m: grammers_client::message::Message) -> Result<()> {
+    async fn on_message(self: &Arc<Self>, m: grammers_client::message::Message) -> Result<()> {
         let Some(peer) = m.peer_ref().await.map_err(|e| anyhow::anyhow!("{e}"))? else { return Ok(()) };
         if !self.is_owner(m.sender_id().and_then(|s| s.bare_id())) || !matches!(m.peer(), Some(grammers_client::peer::Peer::User(_))) {
             return Ok(()); // strangers get no reply at all
@@ -221,7 +250,7 @@ impl Bot {
         }
     }
 
-    async fn command(&self, cmd: &str, arg: &str, peer: PeerRef, m: &grammers_client::message::Message) -> Result<()> {
+    async fn command(self: &Arc<Self>, cmd: &str, arg: &str, peer: PeerRef, m: &grammers_client::message::Message) -> Result<()> {
         match cmd {
             "start" | "help" => self.say(peer, HELP).await,
             "cancel" => {
@@ -234,6 +263,15 @@ impl Bot {
                 }
                 *self.conv.lock().await = Conv::Phone;
                 self.say(peer, "Номер телефону акаунта у форматі <code>+380501234567</code>:").await
+            }
+            "qr" => {
+                if self.mgr.is_logged_in().await {
+                    return self.say(peer, "Уже підключено. /logout щоб вийти.").await;
+                }
+                self.mgr.begin_qr().await?;
+                self.say(peer, &format!("Відкрий на цьому комп'ютері <b>http://{}/login</b> — там QR-код.\nУ Telegram на телефоні: <i>Налаштування → Пристрої → Підключити пристрій</i> і скануй його. Код не потрібен. Чекаю до 5 хвилин.", self.ctx.cfg.web_addr)).await?;
+                self.watch_qr(peer);
+                Ok(())
             }
             "resend" => match self.mgr.resend_code().await {
                 Ok(info) => {
@@ -519,7 +557,7 @@ pub(crate) fn validate_setting(col: &str, v: &serde_json::Value) -> std::result:
 const NOT_LOGGED: &str = "Userbot не підключено — спершу /login.";
 
 const HELP: &str = "<b>TelegramHelper</b> — асистент для твого акаунта.\n\n\
-<b>Акаунт</b>: /login · /logout · /sync · /status\n\
+<b>Акаунт</b>: /login · /qr (вхід QR-кодом) · /logout · /sync · /status\n\
 <b>Ключі</b>: <code>/key openai sk-…</code> · <code>/key gemini …</code>\n\
 <b>Налаштування</b>: /settings · <code>/set ключ значення</code>\n\
 <b>Чати</b>: <code>/chat Ім'я</code> · <code>/catchup Ім'я</code> · <code>/send інструкція</code> · <code>/search текст</code>\n\

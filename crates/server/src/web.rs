@@ -16,11 +16,14 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 use tgh_core::{db::analytics as a, db::Db, Status};
+use tgh_tg::manager::{Manager, QrStatus};
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Db,
     pub status: Arc<Status>,
+    /// `None` in `--demo` mode (no Telegram side).
+    pub mgr: Option<Arc<Manager>>,
 }
 
 #[derive(Deserialize)]
@@ -59,6 +62,8 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(|| asset(include_str!("../web/index.html"), "text/html; charset=utf-8")))
         .route("/app.js", get(|| asset(include_str!("../web/app.js"), "text/javascript; charset=utf-8")))
         .route("/style.css", get(|| asset(include_str!("../web/style.css"), "text/css; charset=utf-8")))
+        .route("/login", get(|| asset(include_str!("../web/login.html"), "text/html; charset=utf-8")))
+        .route("/api/qr", get(|State(s): State<AppState>| async move { Json(qr_json(&s)) }))
         .route("/api/overview", get(|State(s): State<AppState>| async move {
             let up = s.status.userbot_connected.load(Ordering::Relaxed);
             ok(s.db.call(move |c| a::overview(c, up)).await)
@@ -99,6 +104,23 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+fn qr_json(s: &AppState) -> Value {
+    let Some(mgr) = &s.mgr else { return serde_json::json!({"status": "idle"}) };
+    let qr = mgr.qr();
+    let url = qr.url.lock().unwrap().clone();
+    let svg = url.and_then(|u| {
+        qrcode::QrCode::new(u.as_bytes()).ok().map(|c| c.render::<qrcode::render::svg::Color>().min_dimensions(300, 300).quiet_zone(false).build())
+    });
+    let (status, message) = match mgr.qr_status() {
+        QrStatus::Idle => ("idle", None),
+        QrStatus::Waiting => ("waiting", None),
+        QrStatus::PasswordNeeded(_) => ("password", None),
+        QrStatus::Done(n) => ("done", Some(n)),
+        QrStatus::Failed(e) => ("failed", Some(e)),
+    };
+    serde_json::json!({"status": status, "svg": svg, "message": message})
+}
+
 /// Bind refuses non-loopback addresses unless `ALLOW_REMOTE_UI=1` (the UI has no authentication).
 pub async fn serve(addr: &str, state: AppState) -> anyhow::Result<()> {
     let sock: SocketAddr = addr.parse()?;
@@ -118,7 +140,7 @@ mod tests {
     use tower_service::Service;
 
     fn app() -> Router {
-        router(AppState { db: Db::open_in_memory().unwrap(), status: Arc::new(Status::default()) })
+        router(AppState { db: Db::open_in_memory().unwrap(), status: Arc::new(Status::default()), mgr: None })
     }
 
     async fn get_json(host: &str, uri: &str) -> (StatusCode, String) {
@@ -138,13 +160,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn login_page_and_idle_qr() {
+        let (s, b) = get_json("localhost", "/login").await;
+        assert!(s.is_success() && b.contains("/api/qr"));
+        assert_eq!(get_json("localhost", "/api/qr").await.1, "{\"status\":\"idle\"}");
+    }
+
+    #[tokio::test]
     async fn rejects_foreign_host() {
         assert_eq!(get_json("evil.example:8787", "/api/overview").await.0, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
     async fn refuses_public_bind() {
-        let st = AppState { db: Db::open_in_memory().unwrap(), status: Arc::new(Status::default()) };
+        let st = AppState { db: Db::open_in_memory().unwrap(), status: Arc::new(Status::default()), mgr: None };
         assert!(serve("0.0.0.0:0", st).await.is_err());
     }
 }

@@ -141,3 +141,57 @@ mod tests {
         assert_eq!(describe_next(&tl::enums::auth::CodeType::Sms), "SMS");
     }
 }
+
+// ------------------------------------------------------------------ QR login
+
+pub enum QrPoll {
+    /// Show this `tg://login?token=…` as a QR code and keep polling.
+    Waiting(String),
+    Done(User),
+    Password(PasswordToken),
+}
+
+fn qr_url(token: &[u8]) -> String {
+    use base64::Engine;
+    format!("tg://login?token={}", base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(token))
+}
+
+/// One step of QR login: (re)export the token; follows a DC migration; completes on scan.
+pub async fn qr_poll(client: &Client, session: &DbSession, api_id: i32, api_hash: &str) -> Result<QrPoll> {
+    use tl::enums::auth::LoginToken as T;
+    let req = tl::functions::auth::ExportLoginToken { api_id, api_hash: api_hash.to_string(), except_ids: vec![] };
+    let mut res = match client.invoke(&req).await {
+        Ok(r) => r,
+        Err(e) if e.is("SESSION_PASSWORD_NEEDED") => return password_step(client).await,
+        Err(e) => bail!("ExportLoginToken: {e}"),
+    };
+    if let T::MigrateTo(m) = &res {
+        res = match client.invoke_in_dc(m.dc_id, &tl::functions::auth::ImportLoginToken { token: m.token.clone() }).await {
+            Ok(r) => r,
+            Err(e) if e.is("SESSION_PASSWORD_NEEDED") => return password_step(client).await,
+            Err(e) => bail!("ImportLoginToken: {e}"),
+        };
+    }
+    match res {
+        T::Token(t) => Ok(QrPoll::Waiting(qr_url(&t.token))),
+        T::Success(s) => match s.authorization {
+            tl::enums::auth::Authorization::Authorization(a) => Ok(QrPoll::Done(complete_login(client, session, a).await?)),
+            _ => bail!("sign-up required for this account"),
+        },
+        T::MigrateTo(_) => bail!("repeated DC migration"),
+    }
+}
+
+async fn password_step(client: &Client) -> Result<QrPoll> {
+    let pw: tl::types::account::Password = client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
+    Ok(QrPoll::Password(PasswordToken::new(pw)))
+}
+
+#[cfg(test)]
+mod qr_tests {
+    #[test]
+    fn qr_url_is_url_safe_base64() {
+        let u = super::qr_url(&[0xfb, 0xff, 0xfe, 1, 2, 3]);
+        assert_eq!(u, "tg://login?token=-__-AQID");
+    }
+}
