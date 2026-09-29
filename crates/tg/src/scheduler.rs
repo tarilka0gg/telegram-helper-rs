@@ -16,6 +16,7 @@ pub fn spawn_all(bot: Arc<Bot>) {
     tokio::spawn(news_loop(bot.clone()));
     tokio::spawn(reminders_loop(bot.clone()));
     tokio::spawn(classify_loop(bot.clone()));
+    tokio::spawn(prune_loop(bot.clone()));
     tokio::spawn(sync_loop(bot));
 }
 
@@ -132,6 +133,18 @@ async fn reminders_loop(bot: Arc<Bot>) {
                 let _ = bot.ctx.db.call(move |c| repo::set_commitment_status(c, uid, id, &st)).await;
             }
         }
+    }
+}
+
+/// Once a day: trim old analytics rows.
+async fn prune_loop(bot: Arc<Bot>) {
+    loop {
+        match bot.ctx.db.call(repo::prune_old).await {
+            Ok(n) if n > 0 => tracing::info!("pruned {n} old analytics rows"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("prune failed: {e:#}"),
+        }
+        tokio::time::sleep(Duration::from_secs(24 * 3600)).await;
     }
 }
 

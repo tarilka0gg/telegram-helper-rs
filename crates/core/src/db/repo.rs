@@ -465,6 +465,8 @@ pub fn news_sources(c: &Connection, user_id: i64) -> Result<Vec<(i64, String, St
     rows.collect()
 }
 
+pub const NEWS_PER_SOURCE: i64 = 8;
+
 const NEWS_FROM: &str = "FROM messages m
     JOIN contacts k ON k.user_id = m.user_id AND k.peer_id = m.peer_id AND k.is_news_source = 1 AND k.mirror = 1
       AND NOT (k.is_archived = 1 AND COALESCE((SELECT ignore_archived FROM user_settings u WHERE u.user_id = k.user_id), 1) = 1)
@@ -477,8 +479,17 @@ fn news_row(r: &Row) -> Result<MessageRow> {
 }
 
 /// Posts from news sources since `since` that were never included in a digest.
+///
+/// At most [`NEWS_PER_SOURCE`] posts per source are taken (newest first) so one chatty channel cannot crowd
+/// the others out of the digest; the result is then capped at `limit` overall.
 pub fn news_unsent(c: &Connection, user_id: i64, since: &str, topic: Option<&str>, limit: i64) -> Result<Vec<MessageRow>> {
-    let sql = format!("SELECT m.peer_id, m.message_id, m.sender_id, k.display_name, m.is_outgoing, m.date, m.kind, m.text {NEWS_FROM} AND m.date >= ?2 ORDER BY m.date DESC LIMIT ?4");
+    let sql = format!(
+        "SELECT peer_id, message_id, sender_id, name, is_outgoing, date, kind, text FROM (
+            SELECT m.peer_id AS peer_id, m.message_id AS message_id, m.sender_id AS sender_id, k.display_name AS name,
+                   m.is_outgoing AS is_outgoing, m.date AS date, m.kind AS kind, m.text AS text,
+                   ROW_NUMBER() OVER (PARTITION BY m.peer_id ORDER BY m.date DESC) AS rn {NEWS_FROM} AND m.date >= ?2
+         ) WHERE rn <= {NEWS_PER_SOURCE} ORDER BY date DESC LIMIT ?4"
+    );
     let mut st = c.prepare(&sql)?;
     let rows = st.query_map(params![user_id, since, topic, limit], news_row)?;
     rows.collect()
@@ -542,6 +553,13 @@ pub fn apply_classification(c: &Connection, user_id: i64, items: &[(i64, String,
         }
     }
     Ok((done, sources))
+}
+
+/// Drops analytics rows nobody looks at any more (events > 90 days, LLM usage > 1 year); keeps the DB small.
+pub fn prune_old(c: &Connection) -> Result<usize> {
+    let a = c.execute("DELETE FROM events WHERE ts < datetime('now', '-90 days')", [])?;
+    let b = c.execute("DELETE FROM llm_usage WHERE ts < datetime('now', '-365 days')", [])?;
+    Ok(a + b)
 }
 
 // ---- auto-reply ------------------------------------------------------------
@@ -622,6 +640,18 @@ mod tests {
     }
 
     #[test]
+    fn prune_removes_only_old_analytics() {
+        let c = db();
+        c.execute("INSERT INTO events(ts, kind) VALUES (datetime('now','-100 days'), 'old')", []).unwrap();
+        c.execute("INSERT INTO events(ts, kind) VALUES (datetime('now','-1 days'), 'new')", []).unwrap();
+        c.execute("INSERT INTO llm_usage(ts, provider, model, purpose) VALUES (datetime('now','-400 days'), 'p', 'm', 'x')", []).unwrap();
+        c.execute("INSERT INTO llm_usage(ts, provider, model, purpose) VALUES (datetime('now','-10 days'), 'p', 'm', 'x')", []).unwrap();
+        assert_eq!(prune_old(&c).unwrap(), 2);
+        assert_eq!(c.query_row::<i64, _, _>("SELECT count(*) FROM events", [], |r| r.get(0)).unwrap(), 1);
+        assert_eq!(c.query_row::<i64, _, _>("SELECT count(*) FROM llm_usage", [], |r| r.get(0)).unwrap(), 1);
+    }
+
+    #[test]
     fn edits_update_text_but_are_not_new() {
         let c = db();
         let u = ensure_user(&c, 1).unwrap();
@@ -699,6 +729,21 @@ mod tests {
         let latest = news_latest_unsent(&c, u, None, 1).unwrap();
         assert_eq!((latest.len(), latest[0].message_id), (1, 2));
         assert_eq!(news_latest_unsent(&c, u, Some("RUST"), 5).unwrap().len(), 1);
+
+        // fairness: a chatty source is capped, the quiet one still shows up
+        for i in 100..140 {
+            save_message(&c, u, &post(10, i, "2099-01-01 10:00:00", &format!("spam {i}"))).unwrap();
+        }
+        upsert_contact(&c, u, &ContactRow { peer_id: 12, peer_kind: "channel".into(), is_bot: false, is_archived: false, display_name: "Quiet".into(), username: None }).unwrap();
+        update_contact_flags(&c, u, 12, Some(true), None, None).unwrap();
+        save_message(&c, u, &post(12, 1, "2099-01-01 09:00:00", "quiet post")).unwrap();
+        let fair = news_unsent(&c, u, "2098-01-01 00:00:00", None, 40).unwrap();
+        assert_eq!(fair.iter().filter(|p| p.peer_id == 10).count() as i64, NEWS_PER_SOURCE);
+        assert!(fair.iter().any(|p| p.peer_id == 12), "the quiet channel was crowded out");
+        for i in 100..140 {
+            c.execute("DELETE FROM messages WHERE peer_id = 10 AND message_id = ?", [i]).unwrap();
+        }
+        c.execute("DELETE FROM messages WHERE peer_id = 12", []).unwrap();
 
         // once delivered, never again
         mark_news_sent(&c, u, &[(10, 2)]).unwrap();

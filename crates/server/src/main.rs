@@ -10,7 +10,7 @@ use tgh_tg::{bot, ctx::Ctx, manager::Manager};
 async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,grammers_mtsender=warn,grammers_client=warn".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,grammers_mtsender=warn,grammers_client=warn,grammers_session=warn,grammers_mtproto=warn".into()))
         .init();
     if std::env::args().any(|a| a == "--demo") {
         let db = Db::open_in_memory()?;

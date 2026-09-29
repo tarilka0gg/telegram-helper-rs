@@ -370,7 +370,9 @@ pub fn spawn_avatar_download(ctx: Arc<Ctx>, client: Client, peers: Vec<Peer>) {
         for p in peers {
             let Some(id) = p.id().bare_id() else { continue };
             let path = avatar_path(&dir, id);
-            if path.exists() {
+            // Cached for a week: profile pictures change, but rarely.
+            let fresh = std::fs::metadata(&path).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600));
+            if fresh {
                 continue;
             }
             let Ok(Some(photo)) = p.photo(false).await else { continue };
