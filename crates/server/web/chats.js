@@ -4,7 +4,7 @@
   const ICON = { channel: '📢', chat: '👥', supergroup: '👥', user: '👤' };
   let contacts = [], tab = 'all', search = '', flash = null;
 
-  try { contacts = (await (await fetch('/api/contacts')).json()).filter(c => !c.is_bot); } catch (_) { $('count').textContent = 'cannot load contacts'; }
+  try { contacts = (await (await fetch('/api/contacts')).json()).filter(c => !c.is_bot); } catch (_) { flash = 'cannot load contacts (is the server running?)'; }
 
   const TABS = [
     ['all', 'all', () => true], ['channels', 'channels', c => c.kind === 'channel'], ['groups', 'groups', c => c.kind === 'chat' || c.kind === 'supergroup'],

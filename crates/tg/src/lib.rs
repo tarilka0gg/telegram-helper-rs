@@ -8,4 +8,5 @@ pub mod login;
 pub mod manager;
 pub mod news;
 pub mod scheduler;
+pub mod selftest;
 pub mod userbot;

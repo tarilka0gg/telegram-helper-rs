@@ -72,6 +72,13 @@ impl Bot {
     }
 
     async fn propose_send(&self, recipient: &str, text: &str, peer: PeerRef) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return self.say(peer, "Не зрозумів, що саме відправити. Напиши текст повідомлення.").await;
+        }
+        if text.chars().count() > 4000 {
+            return self.say(peer, "Повідомлення задовге для одного відправлення (ліміт Telegram — 4096 символів).").await;
+        }
         let found = features::find_contacts(&self.ctx, recipient).await?;
         if found.is_empty() {
             return self.say(peer, &format!("Не знайшов контакт «{}». Спробуй /sync.", esc(recipient))).await;
@@ -224,7 +231,7 @@ impl Bot {
             }
         }
         let mut v: Vec<(i64, String, i64)> = found.into_iter().map(|(id, (n, c))| (id, n, c)).collect();
-        v.sort_by(|a, b| b.2.cmp(&a.2));
+        v.sort_by_key(|x| std::cmp::Reverse(x.2));
         v.truncate(5);
         v
     }
@@ -238,7 +245,7 @@ impl Bot {
         let (uid, t, d) = (self.ctx.user_id, text.to_string(), deadline.clone());
         self.ctx.db.call(move |c| repo::add_commitment(c, uid, peer_id, &name, "mine", &t, d.as_deref())).await?;
         let tz: chrono_tz::Tz = self.ctx.settings().await?.timezone.parse().unwrap_or(chrono_tz::UTC);
-        let when_txt = deadline.and_then(|d| chrono::NaiveDateTime::parse_from_str(&d, repo::TS_FMT).ok()).map(|d| d.and_utc().with_timezone(&tz).format("%d.%m %H:%M").to_string());
+        let when_txt = deadline.and_then(|d| repo::parse_ts(&d)).map(|d| d.and_utc().with_timezone(&tz).format("%d.%m %H:%M").to_string());
         self.say(peer, &format!("⏰ Запам'ятав: {}{}", esc(text), when_txt.map_or(" (без дати)".into(), |w| format!(" — {w}")))).await
     }
 
@@ -294,5 +301,5 @@ impl Bot {
 }
 
 fn intent_flat(actions: Vec<Intent>) -> Vec<Intent> {
-    actions.into_iter().flat_map(|a| tgh_core::intent::flatten(a)).take(5).collect()
+    actions.into_iter().flat_map(tgh_core::intent::flatten).take(5).collect()
 }

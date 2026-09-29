@@ -38,9 +38,30 @@ impl Db {
     {
         let inner = self.0.clone();
         tokio::task::spawn_blocking(move || {
-            let guard = inner.lock().map_err(|_| anyhow::anyhow!("db mutex poisoned"))?;
+            // A panic inside an earlier closure must not brick the database for the rest of the process:
+            // SQLite itself is still consistent (the transaction rolled back), so take the guard anyway.
+            let guard = inner.lock().unwrap_or_else(|e| e.into_inner());
             Ok(f(&guard)?)
         })
         .await?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn survives_a_panicking_closure() {
+        let db = Db::open_in_memory().unwrap();
+        let r = tokio::spawn({
+            let db = db.clone();
+            async move { db.call::<(), _>(|_| panic!("boom")).await }
+        })
+        .await;
+        assert!(r.is_err() || r.unwrap().is_err());
+        // the mutex is poisoned now, yet the DB keeps working
+        let n: i64 = db.call(|c| c.query_row("SELECT 41 + 1", [], |r| r.get(0))).await.unwrap();
+        assert_eq!(n, 42);
     }
 }

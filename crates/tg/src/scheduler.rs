@@ -3,7 +3,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use chrono::{NaiveDateTime, Timelike, Utc};
+use chrono::{Timelike, Utc};
 use grammers_client::session::types::PeerId;
 use tgh_core::db::repo;
 
@@ -21,13 +21,30 @@ pub fn spawn_all(bot: Arc<Bot>) {
 
 async fn owner(bot: &Bot) -> Option<grammers_client::session::types::PeerRef> {
     // The reference learned from the owner's own messages carries the access hash; the ambient one is a last resort.
-    if let Some(r) = bot.owner_ref.lock().await.clone() {
+    if let Some(r) = *bot.owner_ref.lock().await {
         return Some(r);
     }
     PeerId::user(bot.ctx.cfg.owner_telegram_id).map(PeerId::to_ambient_ref)
 }
 
 /// `HH:MM` now in the owner's time zone plus the start of the local day, expressed in UTC.
+/// Minutes since midnight for an `HH:MM` string (None if malformed).
+fn minutes(hhmm: &str) -> Option<i64> {
+    let (h, m) = hhmm.split_once(':')?;
+    Some(h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?)
+}
+
+/// A daily job fires once, at its time or shortly after (a restart at 09:03 still delivers the 09:00
+/// digest) — but not hours later, which would spam the moment a job is switched on in the afternoon.
+const GRACE_MIN: i64 = 90;
+
+fn due(now_hhmm: &str, at_hhmm: &str) -> bool {
+    match (minutes(now_hhmm), minutes(at_hhmm)) {
+        (Some(now), Some(at)) => now >= at && now - at <= GRACE_MIN,
+        _ => false,
+    }
+}
+
 fn local_clock(tz: &str) -> (String, String) {
     let tz: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
     let now = Utc::now().with_timezone(&tz);
@@ -44,8 +61,7 @@ async fn digest_loop(bot: Arc<Bot>) {
         tokio::time::sleep(TICK).await;
         let Ok(s) = bot.ctx.settings().await else { continue };
         let (hhmm, day_start) = local_clock(&s.timezone);
-        // `>=` rather than `==`: a restart at 09:03 still delivers the 09:00 digest, once.
-        if !s.digest_enabled || hhmm < s.digest_time || fired_today(&bot, "digest_sent", day_start, None).await {
+        if !s.digest_enabled || !due(&hhmm, &s.digest_time) || fired_today(&bot, "digest_sent", day_start, None).await {
             continue;
         }
         let Some(peer) = owner(&bot).await else { continue };
@@ -69,7 +85,7 @@ async fn news_loop(bot: Arc<Bot>) {
         let now = Utc::now();
         let hhmm = format!("{:02}:{:02}", now.hour(), now.minute());
         let day_start = repo::fmt_ts(now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc());
-        if !s.news_enabled || hhmm < s.news_digest_time || fired_today(&bot, "news_sent", day_start, None).await {
+        if !s.news_enabled || !due(&hhmm, &s.news_digest_time) || fired_today(&bot, "news_sent", day_start, None).await {
             continue;
         }
         let uid = bot.ctx.user_id;
@@ -98,7 +114,7 @@ async fn reminders_loop(bot: Arc<Bot>) {
         let Some(peer) = owner(&bot).await else { continue };
         let now = Utc::now().naive_utc();
         for (id, who, text, deadline, status) in items {
-            let Ok(dl) = NaiveDateTime::parse_from_str(&deadline, repo::TS_FMT) else { continue };
+            let Some(dl) = repo::parse_ts(&deadline) else { continue };
             let left = dl - now;
             let (label, new_status) = if left < chrono::Duration::zero() {
                 if !s.reminder_overdue_enabled { continue }
@@ -163,5 +179,30 @@ async fn classify_loop(bot: Arc<Bot>) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_jobs_fire_in_a_window_not_forever() {
+        assert!(due("09:00", "09:00"));
+        assert!(due("09:03", "09:00")); // restart shortly after the scheduled time
+        assert!(due("10:30", "09:00")); // exactly at the grace limit
+        assert!(!due("10:31", "09:00")); // enabled hours later: do not spam
+        assert!(!due("08:59", "09:00")); // not yet
+        assert!(!due("23:59", "00:05"));
+        assert!(!due("09:00", "garbage") && !due("nope", "09:00"));
+    }
+
+    #[test]
+    fn local_clock_handles_bad_zone_and_dst() {
+        let (hhmm, day_start) = local_clock("Not/AZone"); // falls back to UTC instead of panicking
+        assert_eq!(hhmm.len(), 5);
+        assert_eq!(day_start.len(), 19);
+        let (_, kyiv_start) = local_clock("Europe/Kyiv");
+        assert!(repo::parse_ts(&kyiv_start).is_some());
     }
 }

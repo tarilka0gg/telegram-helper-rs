@@ -96,8 +96,8 @@ pub async fn resend_code(client: &Client, info: &CodeInfo) -> Result<CodeInfo> {
 }
 
 pub enum SignIn {
-    Done(User),
-    Password(PasswordToken),
+    Done(Box<User>),
+    Password(Box<PasswordToken>),
     InvalidCode,
     SignUpRequired,
 }
@@ -105,11 +105,11 @@ pub enum SignIn {
 pub async fn sign_in(client: &Client, session: &DbSession, info: &CodeInfo, code: &str) -> Result<SignIn> {
     let req = tl::functions::auth::SignIn { phone_number: info.phone.clone(), phone_code_hash: info.hash.clone(), phone_code: Some(code.to_string()), email_verification: None };
     match client.invoke(&req).await {
-        Ok(tl::enums::auth::Authorization::Authorization(a)) => Ok(SignIn::Done(complete_login(client, session, a).await?)),
+        Ok(tl::enums::auth::Authorization::Authorization(a)) => Ok(SignIn::Done(Box::new(complete_login(client, session, a).await?))),
         Ok(tl::enums::auth::Authorization::SignUpRequired(_)) => Ok(SignIn::SignUpRequired),
         Err(e) if e.is("SESSION_PASSWORD_NEEDED") => {
             let pw: tl::types::account::Password = client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
-            Ok(SignIn::Password(PasswordToken::new(pw)))
+            Ok(SignIn::Password(Box::new(PasswordToken::new(pw))))
         }
         Err(e) if e.is("PHONE_CODE_*") => Ok(SignIn::InvalidCode),
         Err(e) => bail!("SignIn: {e}"),
@@ -147,8 +147,8 @@ mod tests {
 pub enum QrPoll {
     /// Show this `tg://login?token=…` as a QR code and keep polling.
     Waiting(String),
-    Done(User),
-    Password(PasswordToken),
+    Done(Box<User>),
+    Password(Box<PasswordToken>),
 }
 
 fn qr_url(token: &[u8]) -> String {
@@ -175,7 +175,7 @@ pub async fn qr_poll(client: &Client, session: &DbSession, api_id: i32, api_hash
     match res {
         T::Token(t) => Ok(QrPoll::Waiting(qr_url(&t.token))),
         T::Success(s) => match s.authorization {
-            tl::enums::auth::Authorization::Authorization(a) => Ok(QrPoll::Done(complete_login(client, session, a).await?)),
+            tl::enums::auth::Authorization::Authorization(a) => Ok(QrPoll::Done(Box::new(complete_login(client, session, a).await?))),
             _ => bail!("sign-up required for this account"),
         },
         T::MigrateTo(_) => bail!("repeated DC migration"),
@@ -184,7 +184,7 @@ pub async fn qr_poll(client: &Client, session: &DbSession, api_id: i32, api_hash
 
 async fn password_step(client: &Client) -> Result<QrPoll> {
     let pw: tl::types::account::Password = client.invoke(&tl::functions::account::GetPassword {}).await.map_err(|e| anyhow::anyhow!("GetPassword: {e}"))?.into();
-    Ok(QrPoll::Password(PasswordToken::new(pw)))
+    Ok(QrPoll::Password(Box::new(PasswordToken::new(pw))))
 }
 
 #[cfg(test)]

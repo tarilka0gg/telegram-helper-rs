@@ -71,6 +71,19 @@ impl Manager {
         session.peer_ref(pid).await.ok().flatten()
     }
 
+    pub fn ctx(&self) -> &Arc<Ctx> {
+        &self.ctx
+    }
+
+    /// Writes the session to the DB right now (shutdown path; the periodic persister may be up to 5 s behind).
+    pub async fn flush(&self) {
+        let Some(session) = self.inner.lock().await.session.clone() else { return };
+        let (uid, blob) = (self.ctx.user_id, self.ctx.crypto.encrypt(&session.to_json()));
+        if let Err(e) = self.ctx.db.call(move |c| repo::update_session_blob(c, uid, &blob)).await {
+            tracing::warn!("final session flush failed: {e:#}");
+        }
+    }
+
     pub fn qr(&self) -> Arc<QrShared> {
         self.qr.clone()
     }
@@ -117,7 +130,7 @@ impl Manager {
                     Ok(login::QrPoll::Password(pt)) => {
                         let hint = pt.hint().map(str::to_string);
                         if let Some(p) = this.inner.lock().await.pending.as_mut() {
-                            p.password = Some(pt);
+                            p.password = Some(*pt);
                         }
                         this.set_qr(QrStatus::PasswordNeeded(hint), Some(None));
                         return;
@@ -249,7 +262,7 @@ impl Manager {
             }
             SignIn::Password(pt) => {
                 let hint = pt.hint().map(str::to_string);
-                p.password = Some(pt);
+                p.password = Some(*pt);
                 p.info = None;
                 Ok(CodeResult::PasswordRequired(hint))
             }

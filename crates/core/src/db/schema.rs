@@ -5,6 +5,7 @@ use rusqlite::Connection;
 
 const TS: &str = "TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now'))";
 
+/// Tables and indexes (everything except the FTS index, which depends on what already exists).
 pub fn migration_v1() -> String {
     format!(
         r#"
@@ -138,25 +139,6 @@ CREATE TABLE IF NOT EXISTS news_topics (
     created_at {TS}
 );
 
-CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
-    text, transcript, extracted_text,
-    content='messages', content_rowid='id'
-);
-CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-    INSERT INTO messages_fts(rowid, text, transcript, extracted_text)
-    VALUES (new.id, new.text, new.transcript, new.extracted_text);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text)
-    VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text);
-END;
-CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
-    INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text)
-    VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text);
-    INSERT INTO messages_fts(rowid, text, transcript, extracted_text)
-    VALUES (new.id, new.text, new.transcript, new.extracted_text);
-END;
-
 -- analytics (new in the Rust rewrite)
 CREATE TABLE IF NOT EXISTS llm_usage (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +162,46 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS ix_events_ts ON events(ts);
 "#
     )
+}
+
+/// Full-text index over messages. A database created by the Python original already has a
+/// `messages_fts` (with an extra `sender_name` column) and its own `messages_fts_*` triggers; in that case
+/// we keep them — adding ours as well would index every message twice.
+fn ensure_fts(conn: &Connection) -> rusqlite::Result<()> {
+    let exists = |kind: &str, name: &str| -> rusqlite::Result<bool> {
+        conn.prepare("SELECT 1 FROM sqlite_master WHERE type = ? AND name = ?")?.exists([kind, name])
+    };
+    let had_table = exists("table", "messages_fts")?;
+    let python_triggers = exists("trigger", "messages_fts_ai")?;
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            text, transcript, extracted_text,
+            content='messages', content_rowid='id'
+        );",
+    )?;
+    if !python_triggers {
+        conn.execute_batch(
+            "CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, text, transcript, extracted_text)
+                VALUES (new.id, new.text, new.transcript, new.extracted_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text)
+                VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text);
+            END;
+            CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text)
+                VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text);
+                INSERT INTO messages_fts(rowid, text, transcript, extracted_text)
+                VALUES (new.id, new.text, new.transcript, new.extracted_text);
+            END;",
+        )?;
+    }
+    if !had_table {
+        // Brand-new index over a database that already holds messages: index them.
+        conn.execute_batch("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild');")?;
+    }
+    Ok(())
 }
 
 /// v2: chat categories (auto-classified), per-chat mirror switch, and dedupe of news already delivered.
@@ -213,6 +235,8 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         // IF NOT EXISTS everywhere: safe on top of a DB created by the Python app.
         conn.execute_batch(&format!("BEGIN;{}PRAGMA user_version = 1;COMMIT;", migration_v1()))?;
     }
+    // Cheap and idempotent: also repairs a database whose FTS objects are missing.
+    ensure_fts(conn)?;
     if version < 2 {
         migration_v2(conn)?;
         conn.execute_batch("PRAGMA user_version = 2;")?;
@@ -242,5 +266,84 @@ mod tests {
         conn.execute("UPDATE messages SET text = 'buy bread' WHERE message_id = 1", []).unwrap();
         assert_eq!(n("milk"), 0);
         assert_eq!(n("bread"), 1);
+    }
+
+    fn count(c: &Connection, sql: &str) -> i64 {
+        c.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    /// A database as the Python original leaves it: no user_version, no category/mirror columns,
+    /// its own FTS table (extra `sender_name` column) and `messages_fts_*` triggers, real data inside.
+    fn python_original_db() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(
+            "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id BIGINT UNIQUE, created_at DATETIME);
+             CREATE TABLE contacts (id INTEGER PRIMARY KEY, user_id INTEGER, peer_id BIGINT, peer_kind VARCHAR(16), is_bot BOOLEAN, is_archived BOOLEAN,
+                is_news_source BOOLEAN, display_name VARCHAR(256), username VARCHAR(128), phone VARCHAR(32), style_profile TEXT, style_updated_at DATETIME, last_seen_message_id BIGINT);
+             CREATE TABLE messages (id INTEGER PRIMARY KEY, user_id INTEGER, peer_id BIGINT, message_id BIGINT, sender_id BIGINT, sender_name VARCHAR(256),
+                is_outgoing BOOLEAN, date DATETIME, kind VARCHAR(16), text TEXT, transcript TEXT, media_path TEXT, extracted_text TEXT, indexed_in_vector BOOLEAN,
+                UNIQUE (user_id, peer_id, message_id));
+             CREATE VIRTUAL TABLE messages_fts USING fts5(text, transcript, extracted_text, sender_name, content='messages', content_rowid='id', tokenize='unicode61 remove_diacritics 2');
+             CREATE TRIGGER messages_fts_ai AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, text, transcript, extracted_text, sender_name) VALUES (new.id, new.text, new.transcript, new.extracted_text, new.sender_name);
+             END;
+             CREATE TRIGGER messages_fts_ad AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text, sender_name) VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text, old.sender_name);
+             END;
+             CREATE TRIGGER messages_fts_au AFTER UPDATE ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, text, transcript, extracted_text, sender_name) VALUES ('delete', old.id, old.text, old.transcript, old.extracted_text, old.sender_name);
+                INSERT INTO messages_fts(rowid, text, transcript, extracted_text, sender_name) VALUES (new.id, new.text, new.transcript, new.extracted_text, new.sender_name);
+             END;
+             INSERT INTO users(telegram_id, created_at) VALUES (7, '2026-01-01 00:00:00.123456');
+             INSERT INTO contacts(user_id, peer_id, peer_kind, is_bot, is_archived, is_news_source, display_name) VALUES (1, 10, 'user', 0, 0, 0, 'Оля');
+             INSERT INTO messages(user_id, peer_id, message_id, sender_name, is_outgoing, date, kind, text) VALUES (1, 10, 1, 'Оля', 0, '2026-01-01 10:00:00.500000', 'text', 'привіт, купи молоко');",
+        )
+        .unwrap();
+        c
+    }
+
+    #[test]
+    fn migrates_python_original_without_duplicating_fts() {
+        let c = python_original_db();
+        migrate(&c).unwrap();
+        migrate(&c).unwrap(); // idempotent
+        // data survived, new columns exist with sensible defaults
+        assert_eq!(count(&c, "SELECT count(*) FROM messages"), 1);
+        assert_eq!(count(&c, "SELECT mirror FROM contacts WHERE peer_id = 10"), 1);
+        assert_eq!(count(&c, "SELECT count(*) FROM contacts WHERE category IS NULL"), 1);
+        assert_eq!(count(&c, "PRAGMA user_version"), 2);
+        // only the Python triggers exist: ours must not be added on top (would double-index)
+        assert_eq!(count(&c, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('messages_ai','messages_ad','messages_au')"), 0);
+        assert_eq!(count(&c, "SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name LIKE 'messages_fts_%'"), 3);
+        // a new message through our repo layer is indexed exactly once
+        crate::db::repo::ensure_user(&c, 7).unwrap();
+        c.execute("INSERT INTO messages(user_id, peer_id, message_id, is_outgoing, date, kind, text) VALUES (1, 10, 2, 0, '2026-01-02 10:00:00', 'text', 'молоко закінчилось')", []).unwrap();
+        assert_eq!(count(&c, "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'молоко'"), 2);
+        let hits = crate::db::repo::search_messages(&c, 1, "молоко", 10).unwrap();
+        assert_eq!(hits.len(), 2, "each message must be found once, not twice");
+        // the microsecond timestamp written by Python still parses
+        assert!(crate::db::repo::parse_ts(&c.query_row::<String, _, _>("SELECT date FROM messages WHERE message_id = 1", [], |r| r.get(0)).unwrap()).is_some());
+    }
+
+    #[test]
+    fn existing_messages_are_indexed_when_the_index_is_new() {
+        // messages exist but there is no FTS yet (e.g. DB from an older Rust build)
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch(&format!("PRAGMA foreign_keys=OFF;{}", migration_v1())).unwrap();
+        c.execute("INSERT INTO users(telegram_id) VALUES (1)", []).unwrap();
+        c.execute("INSERT INTO messages(user_id, peer_id, message_id, date, text) VALUES (1, 5, 1, '2026-01-01 10:00:00', 'старе повідомлення про дзвінок')", []).unwrap();
+        migrate(&c).unwrap();
+        assert_eq!(count(&c, "SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'дзвінок'"), 1);
+    }
+
+    #[test]
+    fn migrate_survives_repeated_and_partial_runs() {
+        let c = Connection::open_in_memory().unwrap();
+        for _ in 0..3 {
+            migrate(&c).unwrap();
+        }
+        c.execute_batch("PRAGMA user_version = 1; ALTER TABLE contacts DROP COLUMN mirror;").unwrap(); // half-migrated state
+        migrate(&c).unwrap();
+        assert_eq!(count(&c, "SELECT count(*) FROM pragma_table_info('contacts') WHERE name IN ('category','mirror')"), 2);
     }
 }

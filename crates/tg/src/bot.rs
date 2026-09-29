@@ -24,6 +24,9 @@ use crate::{ctx::Ctx, features, manager::{CodeResult, Manager}, userbot};
 /// Inline keyboard as rows of (label, callback data); built into a `ReplyMarkup` per send attempt.
 pub type Kb = Vec<Vec<(String, String)>>;
 
+/// A pending "which one?" question: (action, candidates as (peer_id, name)).
+type Pick = (String, Vec<(i64, String)>);
+
 pub(crate) fn btn(label: impl Into<String>, data: impl Into<String>) -> (String, String) {
     (label.into(), data.into())
 }
@@ -50,7 +53,7 @@ pub struct Bot {
     /// Short-term memory of the dialogue ("write him hi" needs the previous contact).
     memory: Mutex<VecDeque<(String, String)>>,
     /// The last "which one?" question: (action, candidates). Lets "both" / "all of them" answer it.
-    last_pick: Mutex<Option<(String, Vec<(i64, String)>)>>,
+    last_pick: Mutex<Option<Pick>>,
     /// How the bot addresses the owner (with access hash). Learned from the owner's first message, then persisted.
     pub owner_ref: Mutex<Option<PeerRef>>,
 }
@@ -60,10 +63,15 @@ pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
     if !conn.client.is_authorized().await.map_err(|e| anyhow::anyhow!("{e}"))? {
         conn.client.bot_sign_in(&ctx.cfg.bot_token, &ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("bot sign-in failed: {e}"))?;
     }
+    if let Ok(me) = conn.client.get_me().await {
+        if let Some(u) = me.username() {
+            let _ = ctx.bot_username.set(u.to_string());
+        }
+    }
     let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default(), owner_ref: Mutex::default() });
     let mut stream = conn
         .client
-        .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, ..Default::default() })
+        .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, update_queue_limit: Some(10_000), ..Default::default() })
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     bot.load_owner_ref().await;
@@ -161,7 +169,7 @@ impl Bot {
             }
             if self.client.send_message(peer, m).await.is_err() {
                 // Malformed markup from the model must never lose the answer: resend as plain text.
-                let mut plain = InputMessage::new().text(chunk.as_str());
+                let mut plain = InputMessage::new().text(strip_html(chunk));
                 if i == last {
                     if let Some(kb) = &markup {
                         plain = plain.reply_markup(to_markup(kb));
@@ -196,10 +204,17 @@ impl Bot {
     }
 
     async fn on_message(self: &Arc<Self>, m: grammers_client::message::Message) -> Result<()> {
-        let Some(peer) = m.peer_ref().await.map_err(|e| anyhow::anyhow!("{e}"))? else { return Ok(()) };
-        if !self.is_owner(m.sender_id().and_then(|s| s.bare_id())) || !matches!(m.peer(), Some(grammers_client::peer::Peer::User(_))) {
-            return Ok(()); // strangers get no reply at all
+        let sender = m.sender_id().and_then(|s| s.bare_id());
+        let Some(peer) = m.peer_ref().await.map_err(|e| anyhow::anyhow!("{e}"))? else {
+            tracing::debug!("bot: message {} has no resolvable peer, ignored", m.id());
+            return Ok(());
+        };
+        if !self.is_owner(sender) || !matches!(m.peer(), Some(grammers_client::peer::Peer::User(_))) {
+            // strangers get no reply at all; the log line never contains message text
+            tracing::debug!("bot: ignored message from sender {sender:?} (owner is {})", self.ctx.cfg.owner_telegram_id);
+            return Ok(());
         }
+        tracing::debug!("bot: owner message accepted ({} chars)", m.text().chars().count());
         self.remember_owner(peer).await;
         let text = m.text().trim().to_string();
         if text.is_empty() {
@@ -393,13 +408,14 @@ impl Bot {
     /// Shared by `/set` and the agent. Validates key (whitelist) and value before touching the DB.
     pub(crate) async fn apply_setting(&self, key: &str, value: &serde_json::Value) -> Result<String> {
         let Some(col) = intent::setting_column(key) else { return Ok(format!("Невідоме налаштування <code>{}</code>.", esc(key))) };
+        let value = &coerce_bool(col, value);
         if let Err(why) = validate_setting(col, value) {
             return Ok(format!("Недопустиме значення для <code>{col}</code>: {why}"));
         }
         let Some(sql) = intent::json_to_sql(value) else { return Ok("Недопустиме значення.".into()) };
         let uid = self.ctx.user_id;
         self.ctx.db.call(move |c| repo::set_setting(c, uid, col, sql)).await?;
-        Ok(format!("✅ <code>{col}</code> = <code>{}</code>", esc(&value.to_string().trim_matches('"').to_string())))
+        Ok(format!("✅ <code>{col}</code> = <code>{}</code>", esc(value.to_string().trim_matches('"'))))
     }
 
     async fn search(&self, q: &str, peer: PeerRef) -> Result<()> {
@@ -581,6 +597,31 @@ pub(crate) fn is_all_answer(text: &str) -> bool {
     matches!(t.as_str(), "усі" | "всі" | "все" | "обидва" | "обидві" | "обоє" | "і те і те" | "і той і той" | "и то и то" | "оба" | "обе" | "всё" | "both" | "all" | "all of them" | "кожен" | "кожний")
 }
 
+/// Plain-text version of (possibly broken) HTML, for the fallback when Telegram rejects the markup.
+pub(crate) fn strip_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' if in_tag => in_tag = false,
+            c if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    out.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&#39;", "'").replace("&amp;", "&")
+}
+
+/// `/set flag 1` and models answering `1`/`0` for a boolean setting are accepted as true/false.
+fn coerce_bool(col: &str, v: &serde_json::Value) -> serde_json::Value {
+    const BOOLS: &[&str] = &["auto_reply_enabled", "digest_enabled", "news_enabled", "reminders_enabled", "reminder_overdue_enabled", "ignore_archived", "use_heavy_model"];
+    match (BOOLS.contains(&col), v.as_i64()) {
+        (true, Some(0)) => serde_json::Value::Bool(false),
+        (true, Some(1)) => serde_json::Value::Bool(true),
+        _ => v.clone(),
+    }
+}
+
 pub(crate) fn esc(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -606,8 +647,8 @@ pub(crate) fn validate_setting(col: &str, v: &serde_json::Value) -> std::result:
         ("auto_reply_enabled" | "digest_enabled" | "news_enabled" | "reminders_enabled" | "reminder_overdue_enabled" | "ignore_archived" | "use_heavy_model", _) => Err("потрібно true/false"),
         ("auto_reply_mode", String(s)) if s == "static" || s == "smart" => Ok(()),
         ("auto_reply_mode", _) => Err("static або smart"),
-        ("llm_provider", String(s)) if s == "openai" || s == "gemini" => Ok(()),
-        ("llm_provider", _) => Err("openai або gemini"),
+        ("llm_provider", String(s)) if tgh_core::llm::Provider::parse(s).is_some() => Ok(()),
+        ("llm_provider", _) => Err("gemini, groq, zai або openai"),
         ("digest_time" | "news_digest_time", String(s)) if hhmm(s) => Ok(()),
         ("digest_time" | "news_digest_time", _) => Err("формат HH:MM"),
         ("timezone", String(s)) if s.parse::<chrono_tz::Tz>().is_ok() => Ok(()),
@@ -665,6 +706,23 @@ mod tests {
         }
         assert!(!is_all_answer("напиши Олі привіт"));
         assert!(!is_all_answer("покажи новини"));
+    }
+
+    #[test]
+    fn html_fallback_strips_tags_and_unescapes() {
+        assert_eq!(strip_html("<b>Привіт</b> &amp; <i>світе</i> &lt;3"), "Привіт & світе <3");
+        assert_eq!(strip_html("broken <b oops"), "broken ");
+        assert_eq!(strip_html(""), "");
+    }
+
+    #[test]
+    fn booleans_accept_zero_one_and_providers_accept_new_names() {
+        assert_eq!(coerce_bool("digest_enabled", &json!(1)), json!(true));
+        assert_eq!(coerce_bool("digest_enabled", &json!(0)), json!(false));
+        assert_eq!(coerce_bool("auto_reply_cooldown_min", &json!(1)), json!(1)); // numeric settings untouched
+        assert!(validate_setting("llm_provider", &json!("groq")).is_ok());
+        assert!(validate_setting("llm_provider", &json!("zai")).is_ok());
+        assert!(validate_setting("llm_provider", &json!("skynet")).is_err());
     }
 
     #[test]

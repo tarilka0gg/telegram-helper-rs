@@ -58,11 +58,20 @@ async fn main() -> anyhow::Result<()> {
 
     // Web UI in the background; the control bot keeps the process alive until Ctrl+C.
     let web = tokio::spawn(async move { web::serve(&web_addr, web::AppState { db, status, mgr: Some(web_mgr), user_id, avatars }).await });
-    tokio::select! {
-        r = bot::run(ctx, mgr) => r?,
-        r = web => r??,
-    }
-    Ok(())
+    let flush_mgr = mgr.clone();
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let result = tokio::select! {
+        r = bot::run(ctx, mgr) => r,
+        r = web => r?,
+        _ = sigterm.recv() => {
+            tracing::info!("SIGTERM: shutting down");
+            Ok(())
+        }
+    };
+    // Save the MTProto session (auth key, update state) before exiting, whichever way we got here.
+    flush_mgr.flush().await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    result
 }
 
 async fn store_key(cfg: &Config, provider: &str) -> anyhow::Result<()> {

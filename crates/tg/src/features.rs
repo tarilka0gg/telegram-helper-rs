@@ -178,8 +178,8 @@ pub async fn build_digest(ctx: &Ctx) -> Result<String> {
     let hot = |v: Vec<repo::CommitmentRow>| -> Vec<String> {
         v.into_iter()
             .filter(|c| match &c.deadline_at {
-                Some(d) => chrono::NaiveDateTime::parse_from_str(d, repo::TS_FMT).map_or(true, |d| d.and_utc() <= now + Duration::hours(24)),
-                None => chrono::NaiveDateTime::parse_from_str(&c.created_at, repo::TS_FMT).map_or(false, |t| now - t.and_utc() > Duration::days(2)),
+                Some(d) => repo::parse_ts(d).is_none_or(|d| d.and_utc() <= now + Duration::hours(24)),
+                None => repo::parse_ts(&c.created_at).is_some_and(|t| now - t.and_utc() > Duration::days(2)),
             })
             .take(20)
             .map(|c| format!("- {}: {} (до {})", c.peer_name, c.text, c.deadline_at.as_deref().unwrap_or("без срока")))

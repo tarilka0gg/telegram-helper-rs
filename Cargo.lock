@@ -2339,6 +2339,7 @@ dependencies = [
  "chrono-tz",
  "grammers-client",
  "grammers-session",
+ "rusqlite",
  "serde",
  "serde_json",
  "tgh-core",

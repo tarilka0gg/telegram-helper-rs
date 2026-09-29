@@ -9,6 +9,12 @@ pub fn fmt_ts(t: chrono::DateTime<chrono::Utc>) -> String {
     t.format(TS_FMT).to_string()
 }
 
+/// Parses a stored UTC timestamp. Accepts an optional fractional part, because rows written by the
+/// Python original carry microseconds (`2026-01-01 10:00:00.123456`).
+pub fn parse_ts(s: &str) -> Option<chrono::NaiveDateTime> {
+    chrono::NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%d %H:%M:%S%.f").ok()
+}
+
 pub fn ensure_user(c: &Connection, telegram_id: i64) -> Result<i64> {
     c.execute("INSERT OR IGNORE INTO users(telegram_id) VALUES (?)", [telegram_id])?;
     let id: i64 = c.query_row("SELECT id FROM users WHERE telegram_id = ?", [telegram_id], |r| r.get(0))?;
@@ -170,14 +176,20 @@ pub struct MessageRow {
     pub text: Option<String>,
 }
 
-/// Returns true if the row was new.
+/// Stores a message. Returns true only if the row was **new**; an edit of a known message updates
+/// its text (so search stays current) but is not reported as new.
 pub fn save_message(c: &Connection, user_id: i64, m: &MessageRow) -> Result<bool> {
     let n = c.execute(
-        "INSERT INTO messages(user_id, peer_id, message_id, sender_id, sender_name, is_outgoing, date, kind, text)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-         ON CONFLICT(user_id, peer_id, message_id) DO UPDATE SET text = excluded.text WHERE text IS NOT excluded.text",
+        "INSERT OR IGNORE INTO messages(user_id, peer_id, message_id, sender_id, sender_name, is_outgoing, date, kind, text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![user_id, m.peer_id, m.message_id, m.sender_id, m.sender_name, m.is_outgoing, m.date, m.kind, m.text],
     )?;
+    if n == 0 {
+        c.execute(
+            "UPDATE messages SET text = ?1 WHERE user_id = ?2 AND peer_id = ?3 AND message_id = ?4 AND text IS NOT ?1",
+            params![m.text, user_id, m.peer_id, m.message_id],
+        )?;
+    }
     Ok(n > 0)
 }
 
@@ -374,7 +386,9 @@ pub fn chats_matching(c: &Connection, user_id: i64, query: &str, limit: i64) -> 
 }
 
 /// Open "mine" commitments with a deadline, for the reminder loop: (id, peer_name, text, deadline, status).
-pub fn commitments_with_deadline(c: &Connection, user_id: i64) -> Result<Vec<(i64, String, String, String, String)>> {
+pub type DeadlineRow = (i64, String, String, String, String);
+
+pub fn commitments_with_deadline(c: &Connection, user_id: i64) -> Result<Vec<DeadlineRow>> {
     let mut st = c.prepare(
         "SELECT id, COALESCE(peer_name, ''), text, deadline_at, status FROM commitments
          WHERE user_id = ? AND direction = 'mine' AND deadline_at IS NOT NULL AND status IN ('open', 'reminded')",
@@ -492,7 +506,9 @@ pub fn mark_news_sent(c: &Connection, user_id: i64, posts: &[(i64, i64)]) -> Res
 }
 
 /// Rows for the LLM classifier: (peer_id, name, username, kind, up to 3 recent text snippets).
-pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> Result<Vec<(i64, String, Option<String>, String, Vec<String>)>> {
+pub type ClassifyRow = (i64, String, Option<String>, String, Vec<String>);
+
+pub fn contacts_for_classification(c: &Connection, user_id: i64, limit: i64) -> Result<Vec<ClassifyRow>> {
     let mut st = c.prepare(&format!("SELECT k.peer_id, k.display_name, k.username, k.peer_kind FROM contacts k WHERE k.user_id = ?1 AND k.is_bot = 0 AND k.category IS NULL AND NOT {HIDDEN_ARCHIVED} ORDER BY k.display_name LIMIT ?2"))?;
     let base = st.query_map(params![user_id, limit], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))?.collect::<Result<Vec<_>>>()?;
     let mut snip = c.prepare("SELECT substr(text, 1, 120) FROM messages WHERE user_id = ?1 AND peer_id = ?2 AND text IS NOT NULL AND trim(text) <> '' ORDER BY date DESC LIMIT 3")?;
@@ -594,6 +610,28 @@ mod tests {
         assert_eq!(waiting_for_reply(&c, u, "2026-01-01 00:00:00", 10).unwrap().len(), 1);
         assert_eq!(search_messages(&c, u, "молоко", 10).unwrap().len(), 1);
         assert!(search_messages(&c, u, "\" OR 1", 10).is_ok()); // hostile input must not break FTS syntax
+    }
+
+    #[test]
+    fn edits_update_text_but_are_not_new() {
+        let c = db();
+        let u = ensure_user(&c, 1).unwrap();
+        let m = |t: &str| MessageRow { peer_id: 5, message_id: 1, sender_id: None, sender_name: None, is_outgoing: false, date: "2026-01-01 10:00:00".into(), kind: "text".into(), text: Some(t.into()) };
+        assert!(save_message(&c, u, &m("first")).unwrap());
+        assert!(!save_message(&c, u, &m("first")).unwrap());
+        assert!(!save_message(&c, u, &m("edited")).unwrap()); // edit: not new ...
+        assert_eq!(recent_messages(&c, u, 5, 5).unwrap()[0].text.as_deref(), Some("edited")); // ... but stored
+        assert_eq!(search_messages(&c, u, "edited", 5).unwrap().len(), 1);
+        assert!(search_messages(&c, u, "first", 5).unwrap().is_empty()); // FTS follows the update
+    }
+
+    #[test]
+    fn timestamps_with_and_without_microseconds() {
+        assert!(parse_ts("2026-01-01 10:00:00").is_some());
+        assert!(parse_ts("2026-01-01 10:00:00.123456").is_some()); // Python-written rows
+        assert!(parse_ts(" 2026-01-01 10:00:00 ").is_some());
+        assert!(parse_ts("yesterday").is_none());
+        assert!(parse_ts("").is_none());
     }
 
     #[test]

@@ -99,7 +99,7 @@ mod tests {
         let one = r#"{"intent":"set_setting","key":"digest_enabled","value":true}"#;
         let raw = format!(r#"{{"intent":"multi","actions":[{one},{one}]}}"#);
         assert_eq!(flatten(parse_intent(&raw)).len(), 2);
-        let many = format!(r#"{{"intent":"multi","actions":[{}]}}"#, vec![one; 9].join(","));
+        let many = format!(r#"{{"intent":"multi","actions":[{}]}}"#, [one; 9].join(","));
         assert_eq!(flatten(parse_intent(&many)).len(), 5);
     }
 

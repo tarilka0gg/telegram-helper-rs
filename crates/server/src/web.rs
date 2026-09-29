@@ -50,7 +50,7 @@ fn ok(r: anyhow::Result<Value>) -> ApiResult {
 async fn csrf_guard(req: Request, next: Next) -> Response {
     if !matches!(*req.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         let has_header = req.headers().get("x-requested-with").and_then(|v| v.to_str().ok()) == Some("tgh");
-        let origin_ok = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).map_or(true, |o| {
+        let origin_ok = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok()).is_none_or(|o| {
             let host = o.split("://").nth(1).unwrap_or("");
             let name = host.rsplit_once(':').map_or(host, |(h, _)| h);
             matches!(name, "localhost" | "127.0.0.1" | "[::1]")
@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/contacts/{peer_id}", axum::routing::post(update_contact))
         .route("/avatars/{peer_id}", get(avatar))
         .route("/login", get(|| asset(include_str!("../web/login.html"), "text/html; charset=utf-8")))
+        .route("/api/selftest", axum::routing::post(selftest))
         .route("/api/qr", get(|State(s): State<AppState>| async move { Json(qr_json(&s)) }))
         .route("/api/overview", get(|State(s): State<AppState>| async move {
             let up = s.status.userbot_connected.load(Ordering::Relaxed);
@@ -131,6 +132,14 @@ pub fn router(state: AppState) -> Router {
         .layer(middleware::from_fn(csrf_guard))
         .layer(middleware::from_fn(local_host_only))
         .with_state(state)
+}
+
+/// Live end-to-end check of Telegram, the LLM chain, the DB and the bot (see `tgh_tg::selftest`).
+async fn selftest(State(s): State<AppState>) -> Response {
+    let Some(mgr) = &s.mgr else { return (StatusCode::SERVICE_UNAVAILABLE, "no Telegram side in demo mode").into_response() };
+    let checks = tgh_tg::selftest::run(mgr).await;
+    let all_ok = checks.iter().all(|c| c.ok);
+    (if all_ok { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, Json(serde_json::json!({"ok": all_ok, "checks": checks}))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -277,5 +286,100 @@ mod tests {
     async fn refuses_public_bind() {
         let st = test_state();
         assert!(serve("0.0.0.0:0", st).await.is_err());
+    }
+
+    async fn status_of(method: &str, uri: &str, headers: &[(&str, &str)], body: Vec<u8>) -> StatusCode {
+        let mut b = axum::http::Request::builder().method(method).uri(uri).header("host", "localhost:8787");
+        for (k, v) in headers {
+            b = b.header(*k, *v);
+        }
+        app().call(b.body(Body::from(body)).unwrap()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn hostile_query_parameters_never_crash() {
+        // non-numeric -> 400 from the extractor; numeric extremes are clamped in SQL helpers
+        for uri in [
+            "/api/messages/daily?days=abc", "/api/messages/daily?days=", "/api/messages/daily?days=1.5", "/api/llm/daily?days=%00",
+            "/api/messages/top_chats?limit=NaN", "/api/events?limit=99999999999999999999999", "/api/messages/daily?days=7&days=8", // duplicate key
+        ] {
+            assert_eq!(status_of("GET", uri, &[], vec![]).await, StatusCode::BAD_REQUEST, "{uri}");
+        }
+        for uri in [
+            "/api/messages/daily?days=-5", "/api/messages/daily?days=0", "/api/messages/daily?days=9223372036854775807", "/api/llm/by_purpose?days=-9223372036854775808",
+            "/api/events?limit=0", "/api/events?limit=-1", "/api/autoreply/recent?limit=9223372036854775807", "/api/messages/top_chats?days=7&limit=-3",
+            "/api/commitments?status=%27%3B%20DROP%20TABLE%20users%3B--", "/api/commitments?status=%F0%9F%98%80",
+        ] {
+            assert_eq!(status_of("GET", uri, &[], vec![]).await, StatusCode::OK, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn routing_methods_and_bodies() {
+        assert_eq!(status_of("GET", "/nope", &[], vec![]).await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of("GET", "/../../etc/passwd", &[], vec![]).await, StatusCode::NOT_FOUND);
+        assert_eq!(status_of("GET", "/avatars/..%2f..%2fetc%2fpasswd", &[], vec![]).await, StatusCode::BAD_REQUEST);
+        assert_eq!(status_of("GET", "/avatars/99999999999999999999", &[], vec![]).await, StatusCode::BAD_REQUEST);
+        assert_eq!(status_of("DELETE", "/api/overview", &[("x-requested-with", "tgh")], vec![]).await, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(status_of("POST", "/api/overview", &[("x-requested-with", "tgh")], vec![]).await, StatusCode::METHOD_NOT_ALLOWED);
+        let ok = [("x-requested-with", "tgh"), ("content-type", "application/json")];
+        assert_eq!(status_of("POST", "/api/contacts/1", &ok, b"{not json".to_vec()).await, StatusCode::BAD_REQUEST);
+        assert_eq!(status_of("POST", "/api/contacts/1", &ok, br#"{"mirror":"yes"}"#.to_vec()).await, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(status_of("POST", "/api/contacts/abc", &ok, b"{}".to_vec()).await, StatusCode::BAD_REQUEST);
+        assert_eq!(status_of("POST", "/api/contacts/1", &[("x-requested-with", "tgh")], b"{}".to_vec()).await, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        // oversized body is rejected by axum's default limit instead of being buffered
+        assert_eq!(status_of("POST", "/api/contacts/1", &ok, vec![b' '; 3 * 1024 * 1024]).await, StatusCode::PAYLOAD_TOO_LARGE);
+        // Host header variants
+        for host in ["", "localhost.evil.com", "evil.com:8787", "127.0.0.1.evil.com", "[::1]x", "localhost:8787@evil.com"] {
+            let req = axum::http::Request::builder().uri("/api/overview").header("host", host).body(Body::empty()).unwrap();
+            assert_eq!(app().call(req).await.unwrap().status(), StatusCode::FORBIDDEN, "host {host:?}");
+        }
+        let req = axum::http::Request::builder().uri("/api/overview").body(Body::empty()).unwrap(); // no Host at all
+        assert_eq!(app().call(req).await.unwrap().status(), StatusCode::FORBIDDEN);
+        for host in ["localhost", "localhost:1", "127.0.0.1:65535", "[::1]:8787"] {
+            let req = axum::http::Request::builder().uri("/api/overview").header("host", host).body(Body::empty()).unwrap();
+            assert_eq!(app().call(req).await.unwrap().status(), StatusCode::OK, "host {host:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_requests_do_not_deadlock() {
+        let st = test_state();
+        st.db.call(|c| {
+            let uid = repo::ensure_user(c, 5)?;
+            for i in 0..50 {
+                repo::save_message(c, uid, &repo::MessageRow { peer_id: 1, message_id: i, sender_id: None, sender_name: None, is_outgoing: i % 2 == 0, date: "2026-09-01 10:00:00".into(), kind: "text".into(), text: Some("x".into()) })?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let router = router(st.clone());
+        let mut tasks = Vec::new();
+        for i in 0..300 {
+            let mut r = router.clone();
+            tasks.push(tokio::spawn(async move {
+                let uri = ["/api/overview", "/api/messages/daily?days=30", "/api/messages/hourly?days=7", "/api/events?limit=10", "/api/contacts"][i % 5];
+                let req = axum::http::Request::builder().uri(uri).header("host", "localhost").body(Body::empty()).unwrap();
+                r.call(req).await.unwrap().status()
+            }));
+        }
+        for t in tasks {
+            assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(20), t).await.expect("deadlock").unwrap(), StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn xss_payloads_are_returned_as_inert_json() {
+        let st = test_state();
+        let evil = "<img src=x onerror=alert(1)>\"'</script>";
+        st.db.call(move |c| {
+            let uid = repo::ensure_user(c, 5)?;
+            repo::upsert_contact(c, uid, &repo::ContactRow { peer_id: 1, peer_kind: "user".into(), is_bot: false, is_archived: false, display_name: evil.into(), username: Some(evil.into()) })
+        }).await.unwrap();
+        let req = axum::http::Request::builder().uri("/api/contacts").header("host", "localhost").body(Body::empty()).unwrap();
+        let resp = router(st).call(req).await.unwrap();
+        assert!(resp.headers()[header::CONTENT_TYPE].to_str().unwrap().starts_with("application/json"));
+        let body = String::from_utf8(to_bytes(resp.into_body(), 1 << 20).await.unwrap().to_vec()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v[0]["name"], evil); // round-trips intact; escaping is the frontend's job (see scripts/js-smoke.mjs)
     }
 }

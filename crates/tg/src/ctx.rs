@@ -17,6 +17,8 @@ pub struct Ctx {
     pub status: Arc<Status>,
     /// `users.id` of the owner.
     pub user_id: i64,
+    /// Username of the control bot, filled in once it has signed in (used by the self-test).
+    pub bot_username: std::sync::OnceLock<String>,
 }
 
 impl Ctx {
@@ -24,7 +26,7 @@ impl Ctx {
         let crypto = Crypto::new(&cfg.encryption_key)?;
         let owner = cfg.owner_telegram_id;
         let user_id = db.call(move |c| repo::ensure_user(c, owner)).await?;
-        Ok(Arc::new(Self { db, crypto, cfg, status, user_id }))
+        Ok(Arc::new(Self { db, crypto, cfg, status, user_id, bot_username: std::sync::OnceLock::new() }))
     }
 
     pub async fn settings(&self) -> Result<repo::Settings> {

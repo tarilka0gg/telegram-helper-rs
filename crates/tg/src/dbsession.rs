@@ -38,11 +38,12 @@ impl DbSession {
 
     pub fn from_json(json: &str) -> anyhow::Result<Arc<Self>> {
         let s: Snapshot = serde_json::from_str(json)?;
-        let mut data = SessionData::default();
-        data.home_dc = s.home_dc;
-        data.dc_options = s.dc_options.into_iter().map(|d| (d.id, d)).collect();
-        data.peer_infos = s.peers.into_iter().map(|p| (p.id(), p)).collect();
-        data.updates_state = s.updates_state;
+        let data = SessionData {
+            home_dc: s.home_dc,
+            dc_options: s.dc_options.into_iter().map(|d| (d.id, d)).collect(),
+            peer_infos: s.peers.into_iter().map(|p| (p.id(), p)).collect(),
+            updates_state: s.updates_state,
+        };
         Ok(Arc::new(Self { data: Mutex::new(data), dirty: AtomicBool::new(false) }))
     }
 

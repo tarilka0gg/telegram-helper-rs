@@ -26,7 +26,8 @@ fn is_entity(s: &str) -> bool {
 
 /// Extracts `href` from a raw attribute string.
 fn href(attrs: &str) -> Option<String> {
-    let lower = attrs.to_lowercase();
+    // ASCII-only lowercasing keeps byte offsets identical to `attrs` (full Unicode lowercasing can change lengths).
+    let lower = attrs.to_ascii_lowercase();
     let mut from = 0;
     while let Some(i) = lower[from..].find("href") {
         let at = from + i;
@@ -74,7 +75,7 @@ pub fn sanitize_html(input: &str) -> String {
                                 ["http://", "https://", "tg://", "mailto:"].iter().any(|p| h.starts_with(p))
                             });
                             match safe {
-                                Some(h) => out.push_str(&format!("<a href=\"{}\">", h.replace('"', "&quot;"))),
+                                Some(h) => out.push_str(&format!("<a href=\"{}\">", h.replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;"))),
                                 None => out.push_str("<a>"),
                             }
                         } else {
@@ -152,5 +153,59 @@ mod tests {
         assert_eq!(s("a\n\n\n\n\nb"), "a\n\nb");
         assert_eq!(s("```rust\nlet a = 1 < 2;\n```"), "<pre>let a = 1 &lt; 2;</pre>");
         assert_eq!(s("<b>Привіт</b>, 🌍 <i>світе</i>"), "<b>Привіт</b>, 🌍 <i>світе</i>");
+    }
+
+    /// Every `<` in the output must open or close a whitelisted tag; nothing else may survive.
+    fn assert_safe(out: &str) {
+        const OK: &[&str] = &["b", "i", "u", "s", "code", "pre", "a", "tg-spoiler", "blockquote"];
+        let mut rest = out;
+        while let Some(i) = rest.find('<') {
+            rest = &rest[i + 1..];
+            let end = rest.find('>').unwrap_or_else(|| panic!("unterminated tag in {out:?}"));
+            let tag = rest[..end].trim_start_matches('/');
+            let name = tag.split(' ').next().unwrap();
+            assert!(OK.contains(&name), "forbidden tag <{tag}> in {out:?}");
+            if let Some(h) = tag.strip_prefix("a href=\"") {
+                let h = h.trim_end_matches('"').to_lowercase();
+                assert!(["http://", "https://", "tg://", "mailto:"].iter().any(|p| h.starts_with(p)), "unsafe href in {out:?}");
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+
+    #[test]
+    fn fuzz_never_panics_and_output_is_safe() {
+        // Building blocks that stress the tokenizer: broken tags, quotes, entities, multi-byte and
+        // case-folding-hostile characters (İ lowercases to two chars, ẞ, Σ, emoji, RTL).
+        let atoms = [
+            "<", ">", "</", "<a href=\"", "<a href='", "javascript:", "JaVaScRiPt:", "https://x.y/?a=1&b=2", "\"", "'", "&", "&amp;", "&#39;", "&#", "&x",
+            "<b>", "</b>", "<script>", "</script>", "<img src=x onerror=alert(1)>", "<br/>", "<p>", "```", "```rust\n", "\n", "\n\n\n", " ", "=",
+            "İ", "ẞ", "Σ", "ǅ", "ß", "😀", "\u{202e}", "я", "字", "href", "HREF", "<A HREF=\"İhttps://a\">", "<a\thref=\"tg://x\">", "<é>", "<1>", "<-a>", "<a-b>",
+        ];
+        let mut x: u64 = 0x9E3779B97F4A7C15;
+        let mut next = |m: usize| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x % m as u64) as usize
+        };
+        for _ in 0..30_000 {
+            let n = 1 + next(14);
+            let input: String = (0..n).map(|_| atoms[next(atoms.len())]).collect();
+            let out = s(&input);
+            assert_safe(&out);
+            // a fenced block is kept verbatim (including blank lines); everything else is collapsed
+            assert!(out.starts_with("<pre>") || !out.contains("\n\n\n"), "{out:?}");
+            // idempotent on its own output modulo entity re-escaping is not required, but it must stay safe
+            assert_safe(&s(&out));
+        }
+    }
+
+    #[test]
+    fn unicode_case_folding_does_not_shift_offsets() {
+        // Regression: full Unicode lowercasing changed byte lengths and made slicing panic.
+        let out = s("<a title=\"İİİİ\" href=\"https://ok.example\">x</a>");
+        assert_eq!(out, "<a href=\"https://ok.example\">x</a>");
+        assert_eq!(s("<a İ=1 href=javascript:1>x</a>"), "<a>x</a>");
     }
 }

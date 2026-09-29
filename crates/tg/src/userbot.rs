@@ -90,7 +90,7 @@ fn message_row(m: &Message, peer_id: i64) -> MessageRow {
 pub async fn run_updates(ctx: Arc<Ctx>, conn: Connected) -> Result<()> {
     let Connected { client, handle, updates, pool_task } = conn;
     let mut stream = client
-        .stream_updates(updates, UpdatesConfiguration { catch_up: true, ..Default::default() })
+        .stream_updates(updates, UpdatesConfiguration { catch_up: true, update_queue_limit: Some(50_000), ..Default::default() })
         .await
         .map_err(|e| anyhow::anyhow!("stream_updates: {e}"))?;
     ctx.status.userbot_connected.store(true, Ordering::Relaxed);
@@ -131,11 +131,19 @@ pub async fn run_updates(ctx: Arc<Ctx>, conn: Connected) -> Result<()> {
 }
 
 async fn on_message(ctx: &Arc<Ctx>, client: &Client, m: Message, edited: bool) -> Result<()> {
-    let Some(peer) = m.peer().cloned() else { return Ok(()) };
-    let Some(peer_id) = peer.id().bare_id() else { return Ok(()) };
+    let Some(peer_id) = m.peer_id().bare_id() else { return Ok(()) };
+    // Short updates for private messages carry no user object, so `m.peer()` is `None` for them.
+    // Dropping such messages (as an earlier version did) loses live DMs; fall back to the session cache.
+    let peer: Option<Peer> = match m.peer().cloned() {
+        Some(p) => Some(p),
+        None => match m.peer_ref().await {
+            Ok(Some(r)) => client.resolve_peer(r).await.ok(),
+            _ => None,
+        },
+    };
     let uid = ctx.user_id;
 
-    let (row, contact) = (message_row(&m, peer_id), peer_row(&peer, false));
+    let (row, contact) = (message_row(&m, peer_id), peer.as_ref().and_then(|p| peer_row(p, false)));
     // Chats switched off in the web UI are neither stored nor counted.
     let mirror = ctx.db.call(move |c| repo::mirror_enabled(c, uid, peer_id)).await?;
     let is_new = mirror
@@ -156,9 +164,9 @@ async fn on_message(ctx: &Arc<Ctx>, client: &Client, m: Message, edited: bool) -
 
     // Auto-reply only to fresh incoming private messages (an edit is not a new message).
     if !edited && !m.outgoing() && (is_new || !mirror) {
-        if let Peer::User(u) = &peer {
+        if let Some(peer @ Peer::User(u)) = &peer {
             if !u.is_bot() && !u.is_self() {
-                maybe_auto_reply(ctx, client, &m, &peer, peer_id).await?;
+                maybe_auto_reply(ctx, client, &m, peer, peer_id).await?;
             }
         }
     }
@@ -192,8 +200,9 @@ async fn maybe_auto_reply(ctx: &Arc<Ctx>, client: &Client, m: &Message, peer: &P
         return Ok(());
     }
     if let Some(last) = last {
-        let since = chrono::NaiveDateTime::parse_from_str(&last, repo::TS_FMT).ok().map(|t| Utc::now().naive_utc() - t);
-        if since.is_some_and(|d| d < Duration::minutes(s.auto_reply_cooldown_min)) {
+        let since = repo::parse_ts(&last).map(|t| Utc::now().naive_utc() - t);
+        // Unparseable timestamp: better to skip this reply than to risk answering the same person twice.
+        if since.is_none_or(|d| d < Duration::minutes(s.auto_reply_cooldown_min)) {
             return Ok(());
         }
     }
