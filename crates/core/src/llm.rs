@@ -171,7 +171,7 @@ async fn send(req: reqwest::RequestBuilder) -> Result<Value> {
         let this = req.try_clone().context("request not cloneable")?;
         match send_once(this).await {
             Err(SendErr::Transient(e)) if attempt < 2 => {
-                tracing::warn!("LLM transient error, retrying in {delay:?}: {e}");
+                tracing::warn!("LLM transient error, retrying in {delay:?}: {}", e.to_string().chars().take(100).collect::<String>().replace('\n', " "));
                 tokio::time::sleep(delay).await;
                 delay *= 3;
             }
