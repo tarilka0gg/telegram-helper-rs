@@ -1,4 +1,4 @@
-//! LLM providers (OpenAI, Gemini) over plain HTTPS. Every call is recorded in `llm_usage`
+//! LLM providers (Gemini, Groq, Z.ai, OpenAI) over plain HTTPS, chained with fallback. Every call is recorded in `llm_usage`
 //! so the dashboard can show tokens, latency and errors.
 
 use std::time::{Duration, Instant};
@@ -27,18 +27,36 @@ impl ChatMessage {
 pub enum Provider {
     OpenAi,
     Gemini,
+    /// Groq and Z.ai speak the OpenAI chat-completions protocol on their own base URLs.
+    Groq,
+    Zai,
 }
 
 impl Provider {
+    pub const ALL: [Provider; 4] = [Self::Gemini, Self::Groq, Self::Zai, Self::OpenAi];
+
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "openai" => Some(Self::OpenAi),
             "gemini" => Some(Self::Gemini),
+            "groq" => Some(Self::Groq),
+            "zai" => Some(Self::Zai),
             _ => None,
         }
     }
     pub fn name(self) -> &'static str {
-        match self { Self::OpenAi => "openai", Self::Gemini => "gemini" }
+        match self { Self::OpenAi => "openai", Self::Gemini => "gemini", Self::Groq => "groq", Self::Zai => "zai" }
+    }
+    fn default_base(self) -> &'static str {
+        match self {
+            Self::OpenAi => "https://api.openai.com/v1",
+            Self::Gemini => "https://generativelanguage.googleapis.com/v1beta",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::Zai => "https://api.z.ai/api/paas/v4",
+        }
+    }
+    fn openai_style(self) -> bool {
+        !matches!(self, Self::Gemini)
     }
     /// Models to try in order. Free-tier quotas are per model, so a spent daily quota falls through to the next.
     fn chat_models(self, heavy: bool) -> Vec<&'static str> {
@@ -47,10 +65,12 @@ impl Provider {
             (Self::OpenAi, true) => vec![m::OPENAI_CHAT_HEAVY],
             (Self::Gemini, false) => vec![m::GEMINI_CHAT_LIGHT, m::GEMINI_CHAT_FALLBACK, "gemini-3.1-flash-lite"],
             (Self::Gemini, true) => vec![m::GEMINI_CHAT_HEAVY, m::GEMINI_CHAT_LIGHT, m::GEMINI_CHAT_FALLBACK],
+            (Self::Groq, _) => vec!["openai/gpt-oss-120b"],
+            (Self::Zai, _) => vec!["glm-4.7-flash"],
         }
     }
-    fn embed_model(self) -> &'static str {
-        match self { Self::OpenAi => m::OPENAI_EMBED, Self::Gemini => m::GEMINI_EMBED }
+    fn embed_model(self) -> Option<&'static str> {
+        match self { Self::OpenAi => Some(m::OPENAI_EMBED), Self::Gemini => Some(m::GEMINI_EMBED), _ => None }
     }
 }
 
@@ -61,106 +81,140 @@ pub struct Completion {
     pub completion_tokens: i64,
 }
 
-pub struct LlmClient {
-    http: reqwest::Client,
+#[derive(Clone)]
+struct Entry {
     provider: Provider,
     key: String,
     base: String,
+}
+
+/// Models whose *daily* quota is spent, with the time we may try them again. Process-wide, so
+/// short-lived clients do not keep hammering a dead model.
+fn spent() -> &'static std::sync::Mutex<std::collections::HashMap<String, Instant>> {
+    static SPENT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Instant>>> = std::sync::OnceLock::new();
+    SPENT.get_or_init(Default::default)
+}
+
+fn is_spent(provider: Provider, model: &str) -> bool {
+    let key = format!("{}/{model}", provider.name());
+    spent().lock().unwrap().get(&key).is_some_and(|until| Instant::now() < *until)
+}
+
+fn mark_spent(provider: Provider, model: &str) {
+    spent().lock().unwrap().insert(format!("{}/{model}", provider.name()), Instant::now() + Duration::from_secs(30 * 60));
+}
+
+/// A chain of providers: the first is tried first, the rest take over when it fails.
+pub struct LlmClient {
+    http: reqwest::Client,
+    chain: Vec<Entry>,
     db: Db,
 }
 
 impl LlmClient {
     pub fn new(provider: Provider, key: String, db: Db) -> Self {
-        let base = match provider {
-            Provider::OpenAi => "https://api.openai.com/v1",
-            Provider::Gemini => "https://generativelanguage.googleapis.com/v1beta",
-        };
-        Self::with_base(provider, key, db, base)
+        Self::with_base(provider, key, db, provider.default_base())
     }
 
     pub fn with_base(provider: Provider, key: String, db: Db, base: &str) -> Self {
         let http = reqwest::Client::builder().timeout(Duration::from_secs(90)).build().expect("reqwest client");
-        Self { http, provider, key, base: base.trim_end_matches('/').to_string(), db }
+        Self { http, chain: vec![Entry { provider, key, base: base.trim_end_matches('/').to_string() }], db }
+    }
+
+    /// Adds a provider that is tried only if all earlier ones failed.
+    pub fn with_fallback(self, provider: Provider, key: String) -> Self {
+        self.with_fallback_base(provider, key, provider.default_base())
+    }
+
+    pub fn with_fallback_base(mut self, provider: Provider, key: String, base: &str) -> Self {
+        self.chain.push(Entry { provider, key, base: base.trim_end_matches('/').to_string() });
+        self
     }
 
     pub fn provider(&self) -> Provider {
-        self.provider
+        self.chain[0].provider
     }
 
     /// One chat completion; `purpose` labels the call in analytics ("agent", "summary", ...).
+    /// Falls through models (spent daily quota) and then providers (any other failure).
     pub async fn chat(&self, purpose: &str, messages: &[ChatMessage], heavy: bool) -> Result<String> {
-        let mut last = None;
-        for model in self.provider.chat_models(heavy) {
-            let started = Instant::now();
-            let res = self.chat_inner(model, messages).await;
-            let (p, c, ok) = res.as_ref().map(|r| (r.prompt_tokens, r.completion_tokens, true)).unwrap_or((0, 0, false));
-            self.record(purpose, model, p, c, started.elapsed(), ok).await;
-            match res {
-                Ok(r) => return Ok(r.text),
-                Err(e) if e.to_string().contains(DAILY_QUOTA) => {
-                    tracing::warn!("{model}: daily quota spent, trying the next model");
-                    last = Some(e);
+        let mut last: Option<anyhow::Error> = None;
+        for entry in &self.chain {
+            for model in entry.provider.chat_models(heavy) {
+                if is_spent(entry.provider, model) {
+                    continue;
                 }
-                Err(e) => return Err(e),
+                let started = Instant::now();
+                let res = self.chat_inner(entry, model, messages).await;
+                let (p, c, ok) = res.as_ref().map(|r| (r.prompt_tokens, r.completion_tokens, true)).unwrap_or((0, 0, false));
+                self.record(entry.provider, purpose, model, p, c, started.elapsed(), ok).await;
+                match res {
+                    Ok(r) => return Ok(r.text),
+                    Err(e) if e.to_string().contains(DAILY_QUOTA) => {
+                        tracing::warn!("{}/{model}: daily quota spent, skipping it for 30 min", entry.provider.name());
+                        mark_spent(entry.provider, model);
+                        last = Some(e);
+                    }
+                    Err(e) => {
+                        tracing::warn!("{}/{model} failed, trying the next provider: {}", entry.provider.name(), e.to_string().chars().take(120).collect::<String>().replace('\n', " "));
+                        last = Some(e);
+                        break; // other errors are not model-specific: move on to the next provider
+                    }
+                }
             }
         }
-        Err(last.unwrap_or_else(|| anyhow::anyhow!("no model configured")))
+        Err(last.unwrap_or_else(|| anyhow::anyhow!("no LLM provider available")))
     }
 
+    /// Embedding from the first provider in the chain that supports it.
     pub async fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        let model = self.provider.embed_model();
+        let entry = self.chain.iter().find(|e| e.provider.embed_model().is_some()).context("no configured provider supports embeddings")?;
+        let model = entry.provider.embed_model().unwrap();
         let started = Instant::now();
-        let res = self.embed_inner(model, text).await;
-        self.record("embed", model, 0, 0, started.elapsed(), res.is_ok()).await;
+        let res = self.embed_inner(entry, model, text).await;
+        self.record(entry.provider, "embed", model, 0, 0, started.elapsed(), res.is_ok()).await;
         res
     }
 
-    /// Cheap key check used when the owner saves a key.
+    /// Cheap key check used when the owner saves a key (first entry only).
     pub async fn validate(&self) -> bool {
-        self.chat_inner(self.provider.chat_models(false)[0], &[ChatMessage::user("ping")]).await.is_ok()
+        let e = &self.chain[0];
+        self.chat_inner(e, e.provider.chat_models(false)[0], &[ChatMessage::user("ping")]).await.is_ok()
     }
 
-    async fn record(&self, purpose: &str, model: &str, p: i64, c: i64, took: Duration, ok: bool) {
-        let (prov, model, purpose) = (self.provider.name(), model.to_string(), purpose.to_string());
+    #[allow(clippy::too_many_arguments)]
+    async fn record(&self, provider: Provider, purpose: &str, model: &str, p: i64, c: i64, took: Duration, ok: bool) {
+        let (prov, model, purpose) = (provider.name(), model.to_string(), purpose.to_string());
         let ms = took.as_millis() as i64;
         if let Err(e) = self.db.call(move |db| repo::log_llm_usage(db, prov, &model, &purpose, p, c, ms, ok)).await {
             tracing::warn!("cannot record llm usage: {e:#}");
         }
     }
 
-    async fn chat_inner(&self, model: &str, messages: &[ChatMessage]) -> Result<Completion> {
-        let req = match self.provider {
-            Provider::OpenAi => self
-                .http
-                .post(format!("{}/chat/completions", self.base))
-                .bearer_auth(&self.key)
-                .json(&openai_chat_body(model, messages)),
-            Provider::Gemini => self
-                .http
-                .post(format!("{}/models/{model}:generateContent", self.base))
-                .header("x-goog-api-key", &self.key)
-                .json(&gemini_chat_body(messages)),
+    async fn chat_inner(&self, e: &Entry, model: &str, messages: &[ChatMessage]) -> Result<Completion> {
+        let req = if e.provider.openai_style() {
+            self.http.post(format!("{}/chat/completions", e.base)).bearer_auth(&e.key).json(&openai_chat_body(model, messages))
+        } else {
+            self.http.post(format!("{}/models/{model}:generateContent", e.base)).header("x-goog-api-key", &e.key).json(&gemini_chat_body(messages))
         };
         let v = send(req).await?;
-        match self.provider {
-            Provider::OpenAi => parse_openai_chat(&v),
-            Provider::Gemini => parse_gemini_chat(&v),
-        }
+        if e.provider.openai_style() { parse_openai_chat(&v) } else { parse_gemini_chat(&v) }
     }
 
-    async fn embed_inner(&self, model: &str, text: &str) -> Result<Vec<f32>> {
-        let (req, path): (_, &[&str]) = match self.provider {
-            Provider::OpenAi => (
-                self.http.post(format!("{}/embeddings", self.base)).bearer_auth(&self.key).json(&json!({"model": model, "input": text})),
+    async fn embed_inner(&self, e: &Entry, model: &str, text: &str) -> Result<Vec<f32>> {
+        let (req, path): (_, &[&str]) = if e.provider.openai_style() {
+            (
+                self.http.post(format!("{}/embeddings", e.base)).bearer_auth(&e.key).json(&json!({"model": model, "input": text})),
                 &["data", "0", "embedding"],
-            ),
-            Provider::Gemini => (
+            )
+        } else {
+            (
                 self.http
-                    .post(format!("{}/models/{model}:embedContent", self.base))
-                    .header("x-goog-api-key", &self.key)
+                    .post(format!("{}/models/{model}:embedContent", e.base))
+                    .header("x-goog-api-key", &e.key)
                     .json(&json!({"model": format!("models/{model}"), "content": {"parts": [{"text": text}]}})),
                 &["embedding", "values"],
-            ),
+            )
         };
         let v = send(req).await?;
         let mut cur = &v;
@@ -305,6 +359,28 @@ mod tests {
         let llm = LlmClient::with_base(Provider::OpenAi, "k".into(), Db::open_in_memory().unwrap(), &base);
         assert_eq!(llm.chat("t", &[ChatMessage::user("x")], false).await.unwrap(), "ok");
         assert_eq!(hits.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn chain_falls_through_to_next_provider() {
+        use axum::{http::StatusCode, routing::post, Json, Router};
+        let bad = Router::new().route("/chat/completions", post(|| async { (StatusCode::UNAUTHORIZED, Json(json!({"error":"bad key"}))) }));
+        let good = Router::new().route("/chat/completions", post(|| async { Json(json!({"choices":[{"message":{"content":"from groq"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}})) }));
+        let mut bases = Vec::new();
+        for app in [bad, good] {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            bases.push(format!("http://{}", l.local_addr().unwrap()));
+            tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+        }
+        let db = Db::open_in_memory().unwrap();
+        let llm = LlmClient::with_base(Provider::Zai, "k1".into(), db.clone(), &bases[0]).with_fallback_base(Provider::Groq, "k2".into(), &bases[1]);
+        assert_eq!(llm.chat("t", &[ChatMessage::user("x")], false).await.unwrap(), "from groq");
+        let rows: Vec<(String, bool)> = db.call(|c| {
+            let mut st = c.prepare("SELECT provider, ok FROM llm_usage ORDER BY id")?;
+            let r = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(r)
+        }).await.unwrap();
+        assert_eq!(rows, vec![("zai".to_string(), false), ("groq".to_string(), true)]);
     }
 
     /// Full path against a local fake OpenAI endpoint: checks auth header, parsing and analytics row.

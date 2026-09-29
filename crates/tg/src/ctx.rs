@@ -32,19 +32,42 @@ impl Ctx {
         self.db.call(move |c| repo::settings(c, uid)).await
     }
 
-    /// LLM client for the owner's chosen provider; `None` when no key is stored yet.
+    /// LLM chain: the owner's chosen provider first, then every other provider that has a key.
+    /// `None` when no key is stored at all.
     pub async fn llm(&self) -> Result<Option<LlmClient>> {
         let uid = self.user_id;
-        let (provider, key) = self
+        let (primary, keys) = self
             .db
             .call(move |c| {
                 let s = repo::settings(c, uid)?;
-                let key = repo::get_api_key(c, uid, &s.llm_provider)?;
-                Ok((s.llm_provider, key))
+                let mut keys = Vec::new();
+                for p in Provider::ALL {
+                    if let Some(enc) = repo::get_api_key(c, uid, p.name())? {
+                        keys.push((p, enc));
+                    }
+                }
+                Ok((s.llm_provider, keys))
             })
             .await?;
-        let (Some(p), Some(enc)) = (Provider::parse(&provider), key) else { return Ok(None) };
-        Ok(Some(LlmClient::new(p, self.crypto.decrypt(&enc)?, self.db.clone())))
+        let mut ordered: Vec<(Provider, String)> = Vec::new();
+        for (p, enc) in keys {
+            let plain = match self.crypto.decrypt(&enc) {
+                Ok(k) => k,
+                Err(e) => {
+                    tracing::warn!("cannot decrypt {} key: {e}", p.name());
+                    continue;
+                }
+            };
+            // the chosen provider goes to the front, the others keep their default order
+            if Some(p) == Provider::parse(&primary) { ordered.insert(0, (p, plain)) } else { ordered.push((p, plain)) }
+        }
+        let mut it = ordered.into_iter();
+        let Some((p, k)) = it.next() else { return Ok(None) };
+        let mut client = LlmClient::new(p, k, self.db.clone());
+        for (p, k) in it {
+            client = client.with_fallback(p, k);
+        }
+        Ok(Some(client))
     }
 
     pub async fn event(&self, kind: &str, peer_id: Option<i64>, detail: Option<String>) {
