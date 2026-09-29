@@ -49,6 +49,8 @@ pub struct Bot {
     conv: Mutex<Conv>,
     /// Short-term memory of the dialogue ("write him hi" needs the previous contact).
     memory: Mutex<VecDeque<(String, String)>>,
+    /// The last "which one?" question: (action, candidates). Lets "both" / "all of them" answer it.
+    last_pick: Mutex<Option<(String, Vec<(i64, String)>)>>,
 }
 
 pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
@@ -56,7 +58,7 @@ pub async fn run(ctx: Arc<Ctx>, mgr: Arc<Manager>) -> Result<()> {
     if !conn.client.is_authorized().await.map_err(|e| anyhow::anyhow!("{e}"))? {
         conn.client.bot_sign_in(&ctx.cfg.bot_token, &ctx.cfg.api_hash).await.map_err(|e| anyhow::anyhow!("bot sign-in failed: {e}"))?;
     }
-    let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default() });
+    let bot = Arc::new(Bot { ctx, mgr, client: conn.client.clone(), conv: Mutex::default(), memory: Mutex::default(), last_pick: Mutex::default() });
     let mut stream = conn
         .client
         .stream_updates(conn.updates, UpdatesConfiguration { catch_up: false, ..Default::default() })
@@ -423,8 +425,16 @@ impl Bot {
             [(k, _)] => self.run_chat_action(action, k.peer_id, &k.display_name, peer).await,
             many if many[0].1 >= 90 && many[1].1 + 10 <= many[0].1 => self.run_chat_action(action, many[0].0.peer_id, &many[0].0.display_name, peer).await,
             many => {
-                let rows: Kb = many.iter().map(|(k, _)| vec![btn(k.display_name.clone(), format!("c:{action}:{}", k.peer_id))]).collect();
-                self.say_with(peer, "Кого саме?", Some(rows)).await
+                let mut rows: Kb = many.iter().map(|(k, _)| vec![btn(k.display_name.clone(), format!("c:{action}:{}", k.peer_id))]).collect();
+                if action != "menu" {
+                    let cands: Vec<(i64, String)> = many.iter().map(|(k, _)| (k.peer_id, k.display_name.clone())).collect();
+                    let payload = serde_json::json!({"action": action, "peers": cands}).to_string();
+                    let uid = self.ctx.user_id;
+                    let pid = self.ctx.db.call(move |c| repo::pending_add(c, uid, "pick_all", &payload)).await?;
+                    rows.push(vec![btn(format!("🔀 Усі ({})", cands.len()), format!("pa:{pid}"))]);
+                    *self.last_pick.lock().await = Some((action.to_string(), cands));
+                }
+                self.say_with(peer, "Кого саме? Можна вибрати кількох — «🔀 Усі» або напиши «обидва».", Some(rows)).await
             }
         }
     }
@@ -455,9 +465,30 @@ impl Bot {
                 self.ctx.db.call(move |c| repo::pending_take(c, uid, id)).await?;
                 self.say(peer, "Відхилено, нічого не відправлено.").await
             }
+            ["pa", id] => {
+                let id = id.parse::<i64>().unwrap_or(0);
+                let Some((_, raw)) = self.ctx.db.call(move |c| repo::pending_take(c, uid, id)).await? else { return self.say(peer, "Ця дія вже виконана.").await };
+                let v: serde_json::Value = serde_json::from_str(&raw)?;
+                let action = v["action"].as_str().unwrap_or("summary").to_string();
+                let peers: Vec<(i64, String)> = serde_json::from_value(v["peers"].clone()).unwrap_or_default();
+                self.run_for_all(&action, peers, peer).await
+            }
             ["sel", id, pid] => self.select_recipient(id.parse().unwrap_or(0), pid.parse().unwrap_or(0), peer).await,
             _ => Ok(()),
         }
+    }
+
+    /// Runs one chat action for several chats, each under its own heading.
+    pub(crate) async fn run_for_all(&self, action: &str, peers: Vec<(i64, String)>, peer: PeerRef) -> Result<()> {
+        *self.last_pick.lock().await = None;
+        for (id, name) in peers {
+            self.say(peer, &format!("<b>{}</b>", esc(&name))).await?;
+            if let Err(e) = self.run_chat_action(action, id, &name, peer).await {
+                tracing::warn!("chat action for {name} failed: {e:#}");
+                self.say(peer, "Не вдалося обробити цей чат.").await?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn contact_name(&self, peer_id: i64) -> Result<String> {
@@ -478,6 +509,12 @@ impl Bot {
     }
 
     async fn free_text(&self, text: &str, peer: PeerRef) -> Result<()> {
+        // "both" / "all of them" answers the last "which one?" without another trip to the model.
+        if is_all_answer(text) {
+            if let Some((action, cands)) = self.last_pick.lock().await.take() {
+                return self.run_for_all(&action, cands, peer).await;
+            }
+        }
         let Some(llm) = self.ctx.llm().await? else {
             return self.say(peer, "Спершу додай LLM-ключ: <code>/key openai sk-…</code>").await;
         };
@@ -513,6 +550,13 @@ impl Bot {
         }
         Ok(())
     }
+}
+
+/// Short replies meaning "all candidates" (Ukrainian / Russian / English).
+pub(crate) fn is_all_answer(text: &str) -> bool {
+    let t: String = text.to_lowercase().chars().filter(|c| c.is_alphanumeric() || c.is_whitespace()).collect();
+    let t = t.split_whitespace().collect::<Vec<_>>().join(" ");
+    matches!(t.as_str(), "усі" | "всі" | "все" | "обидва" | "обидві" | "обоє" | "і те і те" | "і той і той" | "и то и то" | "оба" | "обе" | "всё" | "both" | "all" | "all of them" | "кожен" | "кожний")
 }
 
 pub(crate) fn esc(s: &str) -> String {
@@ -590,6 +634,15 @@ mod tests {
         assert!(parts.iter().all(|p| p.chars().count() <= 50));
         assert_eq!(parts.concat().replace('\n', ""), text.replace('\n', ""));
         assert_eq!(split_message("short", 50), vec!["short".to_string()]);
+    }
+
+    #[test]
+    fn all_answers_are_recognized() {
+        for t in ["і те і те", "Обидва!", "усі", "Both", "  всі  "] {
+            assert!(is_all_answer(t), "{t}");
+        }
+        assert!(!is_all_answer("напиши Олі привіт"));
+        assert!(!is_all_answer("покажи новини"));
     }
 
     #[test]
