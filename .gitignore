@@ -1,0 +1,7 @@
+target/
+data/
+.env
+*.db
+*.db-*
+zig/.zig-cache/
+zig/zig-out/
