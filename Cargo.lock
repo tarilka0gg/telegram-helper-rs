@@ -2311,6 +2311,7 @@ dependencies = [
  "anyhow",
  "axum",
  "dotenvy",
+ "rusqlite",
  "serde",
  "serde_json",
  "tgh-core",

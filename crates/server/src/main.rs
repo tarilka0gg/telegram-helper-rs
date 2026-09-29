@@ -1,3 +1,4 @@
+mod demo;
 mod web;
 
 use std::sync::Arc;
@@ -11,6 +12,14 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,grammers_mtsender=warn,grammers_client=warn".into()))
         .init();
+    if std::env::args().any(|a| a == "--demo") {
+        let db = Db::open_in_memory()?;
+        demo::seed(&db).await?;
+        let addr = std::env::var("WEB_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".into());
+        let status = Arc::new(Status::default());
+        status.userbot_connected.store(true, std::sync::atomic::Ordering::Relaxed);
+        return web::serve(&addr, web::AppState { db, status }).await;
+    }
     let cfg = Config::from_env()?;
     let db = Db::open(&cfg.db_path())?;
     let status = Arc::new(Status::default());
