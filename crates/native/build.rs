@@ -6,7 +6,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", root.display());
     let opt = if env::var("PROFILE").as_deref() == Ok("release") { "ReleaseFast" } else { "Debug" };
     let status = Command::new("zig")
-        .args(["build-lib", "-static", "-O", opt, "-fPIC", "-lc", "--name", "tghnative"])
+        .args(["build-lib", "-static", "-O", opt, "-fPIC", "-lc", "-mcpu=baseline", "--name", "tghnative"])
         .arg(format!("-femit-bin={}", out.join("libtghnative.a").display()))
         .arg(&root)
         .current_dir(&out)

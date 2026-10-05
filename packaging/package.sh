@@ -16,6 +16,9 @@ ARCH=$(uname -m)
 D=dist/$NAME-$VERSION
 rm -rf "${D:?}"
 install -Dm755 target/release/tgh-server -t "$D/prefix/bin"
+# The build machine's libc may carry an "x86-64-v3 needed" note that stops the binary on older CPUs
+# ("CPU ISA level is lower than required"); the code itself is compiled for the baseline.
+objcopy --remove-section=.note.gnu.property "$D/prefix/bin/tgh-server"
 install -Dm644 "packaging/$ID.desktop" -t "$D/prefix/share/applications"
 install -Dm644 packaging/icons/$NAME.svg -t "$D/prefix/share/icons/hicolor/scalable/apps"
 install -Dm644 .env.example packaging/tgh-server.service -t "$D/prefix/share/$NAME"
