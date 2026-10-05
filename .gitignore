@@ -12,3 +12,4 @@ zig/zig-out/
 *.bundle
 .DS_Store
 *.log
+/dist

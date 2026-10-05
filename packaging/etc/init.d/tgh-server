@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# OpenRC service for tgh-server (TelegramHelper: userbot + control bot + localhost dashboard).
+# Settings: /etc/conf.d/tgh-server. The data directory must hold the .env (see .env.example).
+
+description="TelegramHelper (userbot + control bot + localhost dashboard)"
+command="${tgh_binary:-/usr/local/bin/tgh-server}"
+command_user="${tgh_user:-tgh}"
+command_background=true
+pidfile="/run/${RC_SVCNAME}.pid"
+directory="${tgh_home:-/var/lib/tgh-server}"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+# SIGTERM / Ctrl+C save the session before exit; give it a moment.
+retry="TERM/15/KILL/5"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d -m 0700 -o "${command_user}" "${directory}"
+	checkpath -f -m 0640 -o "${command_user}" "${output_log}"
+	if [ ! -f "${directory}/.env" ]; then
+		eerror "${directory}/.env is missing: copy .env.example there, fill it in, chmod 600, chown ${command_user}"
+		return 1
+	fi
+}

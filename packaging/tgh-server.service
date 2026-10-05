@@ -1,0 +1,26 @@
+# systemd user unit (generic: the binary is found on PATH, the data directory is under ~/.local/share).
+#   mkdir -p ~/.config/systemd/user ~/.local/share/tgh-server
+#   cp tgh-server.service ~/.config/systemd/user/ ; put your .env in ~/.local/share/tgh-server/
+#   systemctl --user daemon-reload && systemctl --user enable --now tgh-server
+#   journalctl --user -u tgh-server -f
+[Unit]
+Description=TelegramHelper (userbot + control bot + localhost dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/tgh-server
+ExecStart=/usr/bin/env tgh-server
+Restart=on-failure
+RestartSec=5
+# SIGTERM saves the session before exit; give it a moment.
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/.local/share/tgh-server
+ProtectHome=read-only
+
+[Install]
+WantedBy=default.target

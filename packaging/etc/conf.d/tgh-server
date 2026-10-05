@@ -1,0 +1,7 @@
+# /etc/conf.d/tgh-server
+# The account the service runs as, and its working directory: it holds .env and the data/ directory
+# (database, encrypted session). Create the account with:
+#   useradd -r -m -d /var/lib/tgh-server tgh
+tgh_user="tgh"
+tgh_home="/var/lib/tgh-server"
+tgh_binary="/usr/local/bin/tgh-server"

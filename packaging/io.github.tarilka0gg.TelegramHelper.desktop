@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=TelegramHelper dashboard
+GenericName=Telegram Assistant
+Comment=Open the TelegramHelper web dashboard (the tgh-server service must be running)
+Exec=xdg-open http://127.0.0.1:8787/
+Icon=tgh-server
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=telegram;bot;userbot;
